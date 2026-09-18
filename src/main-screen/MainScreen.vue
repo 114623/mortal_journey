@@ -18,6 +18,7 @@ import SideToolbarPanel from "./SideToolbarPanel.vue";
 import type { MjSavePayload } from "../save/gameSave";
 import PlayerInfoPanel from "./PlayerInfoPanel.vue";
 import StoryChatPanel from "./StoryChatPanel.vue";
+import { pendingProfileCount, hasPendingWorldSettings } from "../role_core/pendingEdits";
 import { TEST_ALLY_DUMMY_NAMES, TEST_ENEMY_DUMMY_NAMES, ALL_TEST_DUMMY_NAMES } from "./testBattle";
 import kuileiAvatar from "../assets/kuilei.png";
 
@@ -69,6 +70,47 @@ const pendingCultivation = ref<CultivationInput | null>(null);
 const chatGenerating = ref(false);
 
 const isBusy = computed(() => phase.value !== "ready" || chatGenerating.value);
+
+/* ── 侧栏折叠（左：主角面板 / 右：功能面板） ─────────────────────
+ * 桌面端折叠成 26px 竖条，手机端（≤900px）折叠成一条横向窄条，
+ * 给中间剧情区让出空间。状态持久化到 localStorage；
+ * 无记录时手机端默认折叠、桌面端默认展开。 */
+const SIDEBAR_COLLAPSE_KEY = "MJ_SIDEBAR_COLLAPSE_V1";
+
+function readSidebarCollapse(): { left: boolean; right: boolean } {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_COLLAPSE_KEY);
+    if (raw) {
+      const v = JSON.parse(raw) as { left?: unknown; right?: unknown };
+      return { left: v.left === true, right: v.right === true };
+    }
+  } catch {
+    /* 损坏即走默认 */
+  }
+  const mobile =
+    typeof window !== "undefined" &&
+    window.matchMedia("(max-width: 900px)").matches;
+  return { left: mobile, right: mobile };
+}
+
+const sidebarCollapsed = ref(readSidebarCollapse());
+
+function toggleSidebar(which: "left" | "right"): void {
+  sidebarCollapsed.value = {
+    ...sidebarCollapsed.value,
+    [which]: !sidebarCollapsed.value[which],
+  };
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSE_KEY, JSON.stringify(sidebarCollapsed.value));
+  } catch {
+    /* 配额不足等场景忽略，仅本次会话内生效 */
+  }
+}
+
+/** 右栏折叠时按钮上的待应用角标（画像 + 世界设定）。 */
+const sidebarPendingBadge = computed(
+  () => pendingProfileCount.value + (hasPendingWorldSettings.value ? 1 : 0),
+);
 
 function onCultivate(input: CultivationInput) {
   pendingCultivation.value = input;
@@ -176,15 +218,38 @@ function startTestBattle() {
         <button type="button" class="main-screen__btn" @click="onBack">返回标题</button>
       </div>
     </header>
-    <div class="main-screen__body">
-      <aside class="main-screen__pane main-screen__pane--player" aria-label="左栏：主角与世界时间">
-        <PlayerInfoPanel
-          :protagonist="protagonist"
-          :world-time="worldTime"
-          :world-time-baseline="worldTimeBaseline"
-          @update:world-time="worldTime = $event"
-          @cultivate="onCultivate"
-        />
+    <div
+      class="main-screen__body"
+      :class="{
+        'main-screen__body--left-collapsed': sidebarCollapsed.left,
+        'main-screen__body--right-collapsed': sidebarCollapsed.right,
+      }"
+    >
+      <aside
+        class="main-screen__pane main-screen__pane--player"
+        :class="{ 'main-screen__pane--collapsed': sidebarCollapsed.left }"
+        aria-label="左栏：主角与世界时间"
+      >
+        <div id="pane-player" class="main-screen__pane-inner">
+          <PlayerInfoPanel
+            :protagonist="protagonist"
+            :world-time="worldTime"
+            :world-time-baseline="worldTimeBaseline"
+            @update:world-time="worldTime = $event"
+            @cultivate="onCultivate"
+          />
+        </div>
+        <button
+          type="button"
+          class="side-collapse side-collapse--at-right"
+          :aria-expanded="!sidebarCollapsed.left"
+          aria-controls="pane-player"
+          :title="sidebarCollapsed.left ? '展开主角面板' : '折叠主角面板'"
+          @click="toggleSidebar('left')"
+        >
+          <span class="side-collapse__arrow" aria-hidden="true">{{ sidebarCollapsed.left ? "»" : "«" }}</span>
+          <span class="side-collapse__label">主角面板</span>
+        </button>
       </aside>
       <main class="main-screen__pane main-screen__pane--chat" aria-label="中栏：剧情">
         <StoryChatPanel
@@ -202,13 +267,31 @@ function startTestBattle() {
           @game-over="emit('gameOver', $event)"
         />
       </main>
-      <aside class="main-screen__pane main-screen__pane--side" aria-label="右栏：功能面板">
-        <SideToolbarPanel
-          :current-location="worldLocation"
-          :test-disabled="isBusy"
-          @test-battle="startTestBattle"
-          @load-save="(v) => emit('loadSave', v)"
-        />
+      <aside
+        class="main-screen__pane main-screen__pane--side"
+        :class="{ 'main-screen__pane--collapsed': sidebarCollapsed.right }"
+        aria-label="右栏：功能面板"
+      >
+        <button
+          type="button"
+          class="side-collapse side-collapse--at-left"
+          :aria-expanded="!sidebarCollapsed.right"
+          aria-controls="pane-side"
+          :title="sidebarCollapsed.right ? '展开功能面板' : '折叠功能面板'"
+          @click="toggleSidebar('right')"
+        >
+          <span v-if="sidebarPendingBadge > 0" class="side-collapse__dot" aria-hidden="true"></span>
+          <span class="side-collapse__arrow" aria-hidden="true">{{ sidebarCollapsed.right ? "«" : "»" }}</span>
+          <span class="side-collapse__label">功能面板</span>
+        </button>
+        <div id="pane-side" class="main-screen__pane-inner">
+          <SideToolbarPanel
+            :current-location="worldLocation"
+            :test-disabled="isBusy"
+            @test-battle="startTestBattle"
+            @load-save="(v) => emit('loadSave', v)"
+          />
+        </div>
       </aside>
     </div>
   </div>

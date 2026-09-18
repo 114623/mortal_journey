@@ -93,9 +93,21 @@
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(220px, 280px);
+  /* 左右栏宽度用变量表达，折叠时只覆盖对应一侧（两侧独立、可同时折叠） */
+  --col-left: minmax(220px, 280px);
+  --col-right: minmax(220px, 280px);
+  grid-template-columns: var(--col-left) minmax(0, 1fr) var(--col-right);
   grid-template-rows: 1fr;
   gap: 0;
+}
+
+/* 折叠态：对应栏收成 26px 竖条（内容隐藏，只剩开关条） */
+.main-screen__body--left-collapsed {
+  --col-left: 26px;
+}
+
+.main-screen__body--right-collapsed {
+  --col-right: 26px;
 }
 
 .main-screen__pane {
@@ -105,6 +117,25 @@
   flex-direction: column;
   border-right: 1px solid var(--mj-border-subtle);
   background: var(--mj-surface);
+}
+
+/* 左右侧栏改为横向排布：内容 + 贴剧情一侧的竖向折叠开关条 */
+.main-screen__pane--player,
+.main-screen__pane--side {
+  flex-direction: row;
+}
+
+.main-screen__pane-inner {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 折叠后彻底隐藏内容区，只留开关条 */
+.main-screen__pane--collapsed .main-screen__pane-inner {
+  display: none;
 }
 
 .main-screen__pane:last-child {
@@ -594,5 +625,114 @@
 
   .main-screen__pane:last-child {
     border-bottom: none;
+  }
+
+  /* 手机端：左右栏改回纵向堆叠，折叠开关变为其底部的横向窄条 */
+  .main-screen__pane--player,
+  .main-screen__pane--side {
+    flex-direction: column;
+  }
+
+  /* 保证内容在上、开关条在下（右栏 DOM 里开关条在前） */
+  .main-screen__pane--player .main-screen__pane-inner,
+  .main-screen__pane--side .main-screen__pane-inner {
+    order: 1;
+  }
+
+  .main-screen__pane--player .side-collapse,
+  .main-screen__pane--side .side-collapse {
+    order: 2;
+  }
+
+  .main-screen__pane--collapsed {
+    max-height: 34px;
+    flex: 0 0 auto;
+  }
+}
+
+/* ───────────────────────────────────────────────────────────────── */
+/* 侧栏折叠开关条：桌面端为贴剧情一侧的竖条，手机端为栏底部横条 */
+/* ───────────────────────────────────────────────────────────────── */
+.side-collapse {
+  flex: 0 0 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  border: none;
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--mj-muted, #8d7a5f);
+  cursor: pointer;
+  font: inherit;
+}
+
+.side-collapse:hover {
+  background: rgba(0, 0, 0, 0.32);
+  color: var(--mj-gold, #e8c547);
+}
+
+.side-collapse:focus-visible {
+  outline: 2px solid var(--mj-gold, #e8c547);
+  outline-offset: -2px;
+}
+
+/* 左栏开关贴右缘、右栏开关贴左缘（都朝向剧情区） */
+.side-collapse--at-right {
+  border-left: 1px solid var(--mj-border-subtle);
+}
+
+.side-collapse--at-left {
+  border-right: 1px solid var(--mj-border-subtle);
+}
+
+.side-collapse__arrow {
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.side-collapse__label {
+  writing-mode: vertical-rl;
+  letter-spacing: 0.18em;
+  font-size: 0.64rem;
+  white-space: nowrap;
+}
+
+/* 折叠成竖条时开关占满整栏 */
+.main-screen__pane--collapsed .side-collapse {
+  flex: 1 1 auto;
+  justify-content: flex-start;
+}
+
+/* 待应用角标：右栏折叠时也能看到有东西待处理 */
+.side-collapse__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--mj-gold, #e8c547);
+  box-shadow: 0 0 6px rgba(232, 197, 71, 0.6);
+  flex-shrink: 0;
+}
+
+@media (max-width: 900px) {
+  .side-collapse {
+    flex: 0 0 auto;
+    width: 100%;
+    flex-direction: row;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 0;
+    border-top: 1px solid var(--mj-border-subtle);
+    border-left: none;
+    border-right: none;
+  }
+
+  .side-collapse__label {
+    writing-mode: horizontal-tb;
+    font-size: 0.72rem;
+  }
+
+  .main-screen__pane--collapsed .side-collapse {
+    flex: 1 1 auto;
   }
 }
