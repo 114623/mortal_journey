@@ -1,0 +1,20 @@
+import { createApp } from "vue";
+import App from "./App.vue";
+
+import "./design-tokens.css";
+import "./rarity-shared.css";
+import "./transitions.css";
+import "./base.css";
+import "./start_frame/start_frame.css";
+import "./log/logPanel.css";
+import "./fate_choice/fateChoice.css";
+import "./main-screen/mainScreen.css";
+import "./main-screen/worldMapModal.css";
+import "./main-screen/mainScreenPlayerPanel.css";
+import "./main-screen/portraitHistoryModal.css";
+import "./main-screen/protagonistDetailModal.css";
+import "./main-screen/gongfaCultivateModal.css";
+import "./main-screen/alchemyModal.css";
+import "./battle_view/battle.css";
+
+createApp(App).mount("#app");

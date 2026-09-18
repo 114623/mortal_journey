@@ -1,0 +1,392 @@
+/**
+ * 角色领域模型 + 境界常量数据表。
+ *
+ * 结构：数据 → 类型 → 再导出
+ *
+ * - 数据：属性键/映射（具体数值见 gameConstants.ts）
+ * - 类型：主属性、槽位状态、角色卡接口、UI 动作
+ * - 导出：itemInfo 再导出、realmUtils 功能函数再导出、gameConstants 再导出
+ */
+
+import type {
+  TreasureItemDefinition,
+  GongfaItemDefinition,
+  InventoryStackItem,
+} from "./itemInfo";
+import type { WorldLocation } from "./worldLocation";
+import type { WorldTime } from "../worldTime";
+
+import {
+  REALM_PRIMARY_STATS_TABLE,
+  CULTIVATION_VALUES_TABLE,
+  SHOUYUAN_VALUES,
+  EQUIP_SLOT_COUNT,
+  GONGFA_SLOT_COUNT,
+  GONGFA_GRADE_ATTRI_TABLE,
+  MIN_NARRATIVE_AGE_BY_MAJOR,
+  MAX_NARRATIVE_AGE_BY_MAJOR,
+  rollGradeAttriValue,
+  GONGFA_GRADE_CULTIVATION_MULT,
+  LINGGEN_CULTIVATION_MULT,
+  LINGGEN_ELEMENT_BONUS_BY_MAJOR,
+  getLinggenElementBonus,
+  formatLinggenBonusText,
+  computeLinggenCombatBonuses,
+  GONGFA_MASTERY_THRESHOLDS,
+  GONGFA_MASTERY_ATTRI_MULT,
+  GONGFA_MASTERY_COMBAT_MULT,
+} from "./gameConstants";
+
+export {
+  REALM_PRIMARY_STATS_TABLE,
+  CULTIVATION_VALUES_TABLE,
+  SHOUYUAN_VALUES,
+  EQUIP_SLOT_COUNT,
+  GONGFA_SLOT_COUNT,
+  GONGFA_GRADE_ATTRI_TABLE,
+  MIN_NARRATIVE_AGE_BY_MAJOR,
+  MAX_NARRATIVE_AGE_BY_MAJOR,
+  rollGradeAttriValue,
+  GONGFA_GRADE_CULTIVATION_MULT,
+  LINGGEN_CULTIVATION_MULT,
+  LINGGEN_ELEMENT_BONUS_BY_MAJOR,
+  getLinggenElementBonus,
+  formatLinggenBonusText,
+  computeLinggenCombatBonuses,
+  GONGFA_MASTERY_THRESHOLDS,
+  GONGFA_MASTERY_ATTRI_MULT,
+  GONGFA_MASTERY_COMBAT_MULT,
+};
+// 一、数据 — 属性键与映射
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const PRIMARY_STAT_KEYS = [
+  "physique",
+  "spirit",
+  "strength",
+  "perception",
+  "guard",
+  "resistance",
+  "agility",
+  "insight",
+] as const;
+
+export type PrimaryStatKey = (typeof PRIMARY_STAT_KEYS)[number];
+
+export const PRIMARY_STAT_KEY_TO_ZH: Readonly<Record<PrimaryStatKey, string>> = {
+  physique: "体魄",
+  spirit: "灵力",
+  strength: "劲力",
+  perception: "神识",
+  guard: "护体",
+  resistance: "灵御",
+  agility: "身法",
+  insight: "悟性",
+};
+
+export const PRIMARY_STAT_KEY_DESC: Readonly<Record<PrimaryStatKey, string>> = {
+  physique: "增加血量",
+  spirit: "增加法力",
+  strength: "提高造成的物伤",
+  perception: "提高造成的法伤",
+  guard: "提高对物伤的抵抗率",
+  resistance: "提高对法伤的抵抗率",
+  agility: "增加行动速度",
+  insight: "增加修炼速度",
+};
+
+export type ZhStatBonusMap = Partial<Record<string, number>>;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 一、数据 — 游戏常量（结构部分）
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const REALM_ORDER = ["凡人", "练气", "筑基", "结丹", "元婴", "化神"] as const;
+export type RealmMajor = (typeof REALM_ORDER)[number];
+
+export const SUB_STAGES = ["初期", "中期", "后期"] as const;
+export type RealmSubStage = (typeof SUB_STAGES)[number];
+
+export type NarrationPerson = "first" | "second" | "third";
+
+export type BreakthroughStatus = "idle" | "ready" | "in_quest";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 一、数据 — 境界主属性表
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface RealmPrimaryStatsRow {
+  realm: string;
+  stage: string;
+  hp: number;
+  mp: number;
+  physique: number;
+  spirit: number;
+  strength: number;
+  perception: number;
+  guard: number;
+  resistance: number;
+  agility: number;
+  insight: number;
+}
+
+export function realmStageIndex(realm: string, stage: string): number {
+  const majorIdx = (REALM_ORDER as readonly string[]).indexOf(realm);
+  if (majorIdx < 0) return 0;
+  const minorIdx = (SUB_STAGES as readonly string[]).indexOf(stage);
+  if (minorIdx < 0) return 0;
+  return majorIdx * SUB_STAGES.length + minorIdx + 1;
+}
+
+export const TABLE: readonly RealmPrimaryStatsRow[] = (REALM_ORDER as readonly string[]).flatMap(
+  (realm) =>
+    (SUB_STAGES as readonly string[]).map((stage, minorIdx) => {
+      const majorIdx = (REALM_ORDER as readonly string[]).indexOf(realm);
+      const idx = majorIdx * SUB_STAGES.length + minorIdx;
+      const row = REALM_PRIMARY_STATS_TABLE[Math.min(idx, REALM_PRIMARY_STATS_TABLE.length - 1)];
+      return {
+        realm, stage,
+        hp: row.hp, mp: row.mp,
+        physique: row.physique, spirit: row.spirit,
+        strength: row.strength, perception: row.perception,
+        guard: row.guard, resistance: row.resistance,
+        agility: row.agility, insight: row.insight,
+      };
+    }),
+);
+
+export const CULTIVATION_VALUES: readonly number[] = CULTIVATION_VALUES_TABLE;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 二、结构 — 类型与接口
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface CultivationRealm {
+  major: string;
+  minor: string;
+}
+
+export type EquippedSlotsState = Array<TreasureItemDefinition | null>;
+
+type Tuple8<T> = [T, T, T, T, T, T, T, T];
+type GongfaSlotCell = GongfaItemDefinition | null;
+
+export type GongfaSlotsState = Tuple8<GongfaSlotCell>;
+
+export type TraitEntry =
+  | string
+  | {
+      name: string;
+      desc: string;
+      rarity: string;
+      /** 天赋具体效果（仅主角开局天赋携带；旧存档无此字段视为已结算/无效果）。 */
+      effect?: import("../../fate_choice/traitEffect").TraitEffect;
+    };
+
+/**
+ * 角色画像提示词：性格 / 外貌 / 记忆三段。
+ *
+ * 三段文本既是喂给 AI 的「人物一致性提示词」（每回合注入剧情 AI / 状态 AI 上下文），
+ * 也是玩家可在「人物档案」界面随时改写的内容。
+ *
+ * - NPC：首次登场时由状态 AI 生成，之后每回合可由 AI 追加更新「记忆」；
+ *   玩家一旦手动保存过（`source="manual"`），AI 便不再覆写，避免玩家设定被冲掉。
+ * - 主角：由玩家自行填写（AI 不写），用于约束叙事口吻与行为风格。
+ * - 外貌：NPC 直接复用文生图核心字段 `Npc.appearance`（两者本就是同一段描述），
+ *   主角则存在 `profile.appearance` 并参与主角立绘 prompt。
+ */
+export interface CharacterProfile {
+  /** 性格提示词：行事准则、说话风格、好恶、野心与底线等。 */
+  personality: string;
+  /** 外貌提示词：可视化外貌描述（NPC 复用核心字段 appearance）。 */
+  appearance: string;
+  /** 记忆提示词：该角色记住的关键经历、恩怨、承诺，以及对主角的印象。 */
+  memory: string;
+  /** 来源：ai=由 AI 生成并维护；manual=玩家手动改写（AI 不再覆写）。 */
+  source: "ai" | "manual";
+}
+
+/** 性格 / 外貌 单段字符上限（防提示词无限膨胀）。 */
+export const PROFILE_FIELD_MAX_LENGTH = 500;
+
+/** 记忆的安全上限（仅防极端输入；正常由「超 1000 字压缩」机制控制体积）。 */
+export const MEMORY_MAX_LENGTH = 20000;
+
+/**
+ * 记忆压缩阈值：超过此长度时，状态 AI 需先压缩再增补。
+ * 记忆刻意不设硬上限——它随经历累积才有价值，靠压缩控制体积。
+ */
+export const MEMORY_COMPRESS_THRESHOLD = 1000;
+
+/** 记忆压缩目标长度（字）。 */
+export const MEMORY_COMPRESS_TARGET = 700;
+
+/** 构造一份空画像。 */
+export function createEmptyProfile(source: "ai" | "manual" = "ai"): CharacterProfile {
+  return { personality: "", appearance: "", memory: "", source };
+}
+
+/**
+ * 规范化画像数据：非字符串字段归零、超长截断、source 非法时回退。
+ * 旧存档无此字段时返回空画像（source 取 fallbackSource）。
+ */
+export function normalizeProfile(
+  raw: unknown,
+  fallbackSource: "ai" | "manual" = "ai",
+): CharacterProfile {
+  const out = createEmptyProfile(fallbackSource);
+  if (!raw || typeof raw !== "object") return out;
+  const o = raw as Record<string, unknown>;
+  const pick = (v: unknown): string =>
+    typeof v === "string" ? v.slice(0, PROFILE_FIELD_MAX_LENGTH) : "";
+  out.personality = pick(o.personality);
+  out.appearance = pick(o.appearance);
+  out.memory = typeof o.memory === "string" ? o.memory.slice(0, MEMORY_MAX_LENGTH) : "";
+  out.source = o.source === "manual" ? "manual" : o.source === "ai" ? "ai" : fallbackSource;
+  return out;
+}
+
+export interface CharacterPlayInfoCommon {
+  id: string;
+  displayName: string;
+  realm: CultivationRealm;
+  primaryStats: Record<PrimaryStatKey, number>;
+  maxHp: number;
+  maxMp: number;
+  currentHp: number;
+  currentMp: number;
+  avatarUrl: string;
+  gender: string;
+  linggen: string[];
+  age: number;
+  ageConfirmed: boolean;
+  shouyuan: number;
+  inventorySlots: Array<InventoryStackItem | null>;
+  gongfaSlots: GongfaSlotsState;
+  equippedSlots: EquippedSlotsState;
+  elixirBonuses?: Record<string, number>;
+  /** 角色画像提示词（性格/外貌/记忆）。旧存档缺省为空画像。 */
+  profile?: CharacterProfile;
+}
+
+export interface ProtagonistPlayInfo extends CharacterPlayInfoCommon {
+  role: "protagonist";
+  narrationPerson: NarrationPerson;
+  birthPlace: WorldLocation;
+  originStory: string;
+  traits: TraitEntry[];
+  xiuwei: number;
+  realmComplete: boolean;
+  breakthroughStatus: BreakthroughStatus;
+  /** 立绘候选池（dataURL）。旧存档缺省为空。 */
+  avatarCandidates?: string[];
+}
+
+export type PowerTier = "小怪" | "精英怪" | "小boss" | "大boss" | "普通NPC";
+
+/**
+ * NPC 种族（决定外貌/服装的文生图要素清单）：
+ * - 修仙者   人形修士，穿戴正常服饰。
+ * - 人形妖兽 整体人形体态，但头部/躯干保留妖兽特征（兽耳/兽角/鳞片/毛色等），穿衣。
+ * - 妖兽     兽形，无人类服饰（clothing 可为空）。
+ */
+export type NpcRace = "修仙者" | "人形妖兽" | "妖兽";
+
+/**
+ * NPC 在场状态机：
+ * - active   当前在主角所在地点，参与剧情 sim。
+ * - dormant  归属本地点但主角暂时离开；保留全部数据，回归时唤醒。
+ * - departed 因剧情离开原地点云游（预留状态，目前与 dormant 同义）。
+ * - dead     已死亡。
+ */
+export type NpcPresence = "active" | "dormant" | "departed" | "dead";
+
+export interface NpcPlayInfo extends CharacterPlayInfoCommon {
+  role: "npc";
+  identity: string;
+  favorability: number;
+  isDead: boolean;
+  powerTier: PowerTier;
+  /** 种族：决定外貌/服装的文生图要素清单。旧存档缺省视为"修仙者"。 */
+  race: NpcRace;
+  /** 外貌特征（自由文本，按种族含发型/脸型/身材/毛色/兽角等要素），用于文生图。 */
+  appearance: string;
+  /** 服装特征（自由文本，含服装类型/主色调/纹样/配饰；兽形"妖兽"可为空），用于文生图。 */
+  clothing: string;
+  traits: TraitEntry[];
+  xiuwei: number;
+  /** 当前所在地点（权威位置字段，由状态 AI 每回合维护；用于在场判定/地图展示/迁移）。 */
+  currentLocation?: WorldLocation | null;
+  /** 在场状态机。 */
+  presence?: NpcPresence;
+  /** 上次被主角见到的世界时间（时间驱动重评估用）。 */
+  lastSeenWorldTime?: WorldTime | null;
+  /** 累计相遇次数。 */
+  encounterCount?: number;
+  /** 立绘候选池（dataURL）：所有生成过的立绘都保留，玩家可切换/删除。旧存档缺省为空。 */
+  avatarCandidates?: string[];
+}
+
+export type EquipSlotKey = number;
+
+export type ProtagonistDetailAction =
+  | { id: "unequipWear"; equipSlot: EquipSlotKey }
+  | { id: "unequipGongfa"; gongfaIndex: number }
+  | { id: "equipWearFromBag"; inventoryIndex: number }
+  | { id: "equipGongfaFromBag"; inventoryIndex: number }
+  | { id: "consumeElixir"; inventoryIndex: number }
+  | { id: "cultivateGongfa"; gongfaIndex: number }
+  | { id: "sellFromBag"; inventoryIndex: number; count: number };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 三、导出 — itemInfo 再导出
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type {
+  TreasureItemDefinition,
+  GongfaItemDefinition,
+  ElixirItemDefinition,
+  MaterialItemDefinition,
+  MiscItemDefinition,
+  CategorizedItemDefinition,
+  SpiritStoneInventoryStack,
+  TreasureBagStack,
+  GongfaBagStack,
+  ElixirBagStack,
+  MaterialBagStack,
+  MiscBagStack,
+  InventoryStackItem,
+} from "./itemInfo";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 三、导出 — realmUtils 功能函数再导出
+// ═══════════════════════════════════════════════════════════════════════════
+
+export {
+  getRealmPrimaryStats,
+  getProtagonistNarrativeAge,
+  getShouyuanForRealm,
+  getCultivationRequired,
+  getRow,
+  hasRow,
+  getTable,
+  getMinNarrativeAgeForMajor,
+  getMaxNarrativeAgeForMajor,
+  customBirthBackgroundImpliesAgeException,
+  resolveEffectiveMajorForNarrativeAge,
+} from "../realmUtils";
+
+export type {
+  CustomBirthSlice,
+  FateChoiceSliceForAge,
+  GameSliceForNarrativeAge,
+} from "../realmUtils";
+
+export type { WorldLocation } from "./worldLocation";
+export {
+  formatWorldLocation,
+  formatWorldLocationDash,
+  parseWorldLocationFromDash,
+  isWorldLocationEqual,
+  isEmptyWorldLocation,
+} from "./worldLocation";
