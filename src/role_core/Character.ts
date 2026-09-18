@@ -44,7 +44,7 @@ import {
 } from "./CharacterEquip";
 import { applyLinggenElixirBoost } from "./types/elixir";
 import { applyStatConversions, applyResourceConversions, type TreasureConversion } from "./types/treasure";
-import { tierFactor, resolveItemTier, gongfaTierFactor } from "./types/itemTier";
+import { treasureTierFactor, resolveItemTier, gongfaTierFactor } from "./types/itemTier";
 
 const HP_PER_PHYSIQUE = 10;
 const MP_PER_SPIRIT = 10;
@@ -191,8 +191,8 @@ export class Character {
   /**
    * 汇总当前已装备法宝的特殊效果转换项。
    *
-   * 转换比率会先按 {@link tierFactor} 做跨阶压制（低阶法宝被高阶修士使用时
-   * 威能衰减，高阶法宝被低阶修士使用时受器灵封印），再返回。
+   * 转换比率会先按 {@link treasureTierFactor} 做跨阶压制（低阶法宝不削弱，
+   * 高阶法宝被低阶修士使用时受器灵封印；凡人阶走专属衰减），再返回。
    * 由于主属性与 HP/MP 上限都读这里的结果，两处压制自然保持一致。
    *
    * @returns 所有已装备法宝 `specialEffect.conversions` 的扁平列表（比率已压制）。
@@ -201,7 +201,7 @@ export class Character {
     const out: TreasureConversion[] = [];
     for (const tr of this.equippedSlots) {
       if (!tr || !tr.specialEffect) continue;
-      const f = tierFactor(resolveItemTier(tr.tier, tr.grade), this.realm.major);
+      const f = treasureTierFactor(resolveItemTier(tr.tier, tr.grade), this.realm.major);
       for (const c of tr.specialEffect.conversions) {
         out.push(f >= 1 ? c : { ...c, ratio: c.ratio * f });
       }

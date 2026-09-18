@@ -28,6 +28,7 @@ import { locationImageStore, type LocationImagesSerialData } from "../role_core/
 import { storyStore, type StorySerialData } from "../role_core/storyStore";
 import { worldSettings, setWorldSettings, loadGlobalWorldSettings } from "../role_core/worldSettingsStore";
 import { serializePendingEdits, restorePendingEdits, clearAllPendingEdits } from "../role_core/pendingEdits";
+import { backfillGongfaTiers } from "../role_core/types/itemTier";
 import { gameLog } from "../log/gameLog";
 
 export const SAVE_VERSION = 1;
@@ -428,6 +429,18 @@ export function isEndedSave(p: MjSavePayload | null | undefined): boolean {
  * 调用前应先 `resetAllGameState()` 清场；恢复后 `storyStore.restored=true`。
  */
 export function restoreSave(payload: MjSavePayload): void {
+  // 存档迁移：阶层系统上线前的老存档，功法全部缺 tier 字段。
+  // 补「与持有者同阶」——同阶压制系数为 1、也不算不入流，数值与行为完全不变，
+  // 但阶层从此显形（天道编辑/修为摘要可见），此后境界提升即按正常规则参与压制。
+  // 必须在 loadFromJson / restoreNpcs 之前做（它们会拷贝/重建数据）。
+  const migratedGongfa =
+    backfillGongfaTiers(payload.protagonist) +
+    (payload.npcs ?? []).reduce((acc, n) => acc + backfillGongfaTiers(n), 0);
+  if (migratedGongfa > 0) {
+    gameLog.info(
+      `[GameSave] 功法阶层迁移：已为 ${migratedGongfa} 门无阶层的老功法补「与持有者同阶」`,
+    );
+  }
   if (payload.protagonist) {
     // loadFromJson 失败（role 非 protagonist / 结构损坏）时静默返回 false，
     // 主角会保持 null —— 主界面面板随之显示占位文案。这里必须落日志，否则无从排查。

@@ -10,7 +10,7 @@ import { Npc } from "../role_core/Npc";
 import { npcStore } from "../role_core/npcStore";
 import { gameLog } from "../log/gameLog";
 import { GONGFA_SLOT_COUNT, GONGFA_MASTERY_COMBAT_MULT, computeLinggenCombatBonuses } from "../role_core/types/gameConstants";
-import { tierFactor, resolveItemTier, applyElixirTierSuppression, gongfaTierFactor } from "../role_core/types/itemTier";
+import { treasureTierFactor, resolveItemTier, applyElixirTierSuppression, gongfaTierFactor } from "../role_core/types/itemTier";
 import { generateId as generateEffectId } from "./formulas";
 import { BASE_CRIT_DMG } from "./constants";
 
@@ -265,8 +265,8 @@ function extractPassiveEffects(
 /**
  * 提取已装备法宝的百分比被动，并注入为战斗 modifier。
  *
- * 每条词条的数值会先按 {@link tierFactor} 做跨阶压制：
- * 低阶法宝被高阶修士使用时威能衰减，高阶法宝被低阶修士使用时受器灵封印。
+ * 每条词条的数值会先按 {@link treasureTierFactor} 做跨阶压制：
+ * 低阶法宝不削弱；高阶法宝被低阶修士使用时受器灵封印；凡人阶走专属衰减。
  *
  * @param equippedSlots 已装备法宝槽。
  * @param combatantId 战斗单位 id。
@@ -282,7 +282,8 @@ function extractTreasurePassiveEffects(
   for (const tr of equippedSlots) {
     if (!tr || !tr.function) continue;
     if (!("modifiers" in tr.function)) continue;
-    const tierF = tierFactor(resolveItemTier(tr.tier, tr.grade), realmMajor);
+    // 法宝低阶不削弱（treasureTierFactor）：仅器灵封印（高阶）与凡人阶衰减生效。
+    const tierF = treasureTierFactor(resolveItemTier(tr.tier, tr.grade), realmMajor);
     for (const mod of tr.function.modifiers) {
       const rawType = mod.modifierType as string;
       const engineType = (rawType === "healReceived" ? "hpRecover" : rawType) as ModifierType;
