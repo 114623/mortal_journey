@@ -198,18 +198,40 @@ export const RULES_DEFAULT = `
 export interface StoryPresetSettings {
   worldView: string;
   rules: string;
+  /** 剧情脉络（可缺省）：玩家希望的发展方向，见 {@link formatStoryOutline}。 */
+  storyOutline?: string;
+}
+
+/**
+ * 把玩家写的「剧情脉络」拼成可注入 system prompt 的段落；为空则返回空串（不注入，省 token）。
+ *
+ * 定位说明（写进提示词里，避免 AI 把它当成硬剧本一次性倾倒）：
+ * 这是**期望与方向**，不是剧本；剧情自洽优先，允许铺垫、迂回，不要求每回合都命中。
+ */
+export function formatStoryOutline(ws: { storyOutline?: string }): string {
+  const text = (ws.storyOutline ?? "").trim();
+  if (!text) return "";
+  return [
+    "[剧情脉络 · 玩家希望的发展方向]",
+    text,
+    "（以上是玩家的期望，不是硬性剧本：当剧情自然走向与之冲突时以自洽为先，" +
+      "可在合适时机铺垫、靠近或迂回；不要生硬地把这些内容一次性塞进同一回合。）",
+  ].join("\n");
 }
 
 /**
  * 用当前世界设定组装剧情 AI 的 system prompt。
  *
- * 输出契约固定，世界观与规则取自玩家可编辑的 {@link StoryPresetSettings}。
+ * 输出契约固定，世界观与规则取自玩家可编辑的 {@link StoryPresetSettings}；
+ * 剧情脉络非空时追加在规则之后。
  */
 export function composeStorySystemPreset(ws: StoryPresetSettings): string {
+  const outline = formatStoryOutline(ws);
   return [
     OUTPUT_CONTRACT,
     "[修仙背景信息]\n" + ws.worldView,
     "[剧情生成基础规则]\n" + ws.rules,
+    ...(outline ? [outline] : []),
     // 合并自外部预设「双星纪 V1.1」的叙事质量规则，固定生效，不随玩家编辑的「规则」变动。
     NARRATIVE_QUALITY_PRESET,
   ].join("\n\n");

@@ -30,6 +30,8 @@ import { useScrollLock } from "../composables/useScrollLock";
 
 const props = defineProps<{
   open: boolean;
+  /** 打开时默认落在哪个标签页（侧边栏「剧情脉络」入口传 storyOutline）。 */
+  initialTab?: TabKey;
 }>();
 
 const emit = defineEmits<{
@@ -41,7 +43,7 @@ const scrollLock = useScrollLock();
 /** 回合进行中：改动进队列，回合结束后生效。 */
 const busy = computed(() => turnBusy.value);
 
-type TabKey = "worldView" | "rules" | "preset";
+type TabKey = "worldView" | "rules" | "preset" | "storyOutline";
 
 const TABS: Array<{ key: TabKey; label: string; hint: string }> = [
   {
@@ -59,7 +61,15 @@ const TABS: Array<{ key: TabKey; label: string; hint: string }> = [
     label: "预设",
     hint: "台词与去旁白散文化、角色防全知、轻小说文风。作用于剧情 / 开局 / 修炼 / 结局 AI。",
   },
+  {
+    key: "storyOutline",
+    label: "剧情脉络",
+    hint: "在这里写下你希望的剧情发展方向供ai参考。可留空；非空时注入剧情 / 开局 / 修炼 / 结局 AI。",
+  },
 ];
+
+const OUTLINE_PLACEHOLDER =
+  "例如：希望主角先加入青云宗，三年内筑基；中途遭遇一次背叛；长期目标是找到失踪的师姐……";
 
 const activeTab = ref<TabKey>("worldView");
 const draft = ref<WorldSettingsText>(createDefaultWorldSettings());
@@ -72,7 +82,8 @@ const dirty = computed(() => {
   return (
     draft.value.worldView !== cur.worldView ||
     draft.value.rules !== cur.rules ||
-    draft.value.preset !== cur.preset
+    draft.value.preset !== cur.preset ||
+    draft.value.storyOutline !== cur.storyOutline
   );
 });
 /** 三段是否都不是默认文本。 */
@@ -99,6 +110,7 @@ watch(
   () => props.open,
   (v) => {
     if (v) {
+      activeTab.value = props.initialTab ?? "worldView";
       syncDraft();
       scrollLock.acquire();
     } else {
@@ -112,6 +124,7 @@ function onSave(): void {
     worldView: draft.value.worldView,
     rules: draft.value.rules,
     preset: draft.value.preset,
+    storyOutline: draft.value.storyOutline,
   };
   // 两条分支都要写全局副本：玩家点「保存」即视为「这就是我想要的设定」，
   // 队列只是延后到回合结束再应用于当前人生，不影响它成为新人生的模板。
@@ -228,6 +241,8 @@ onUnmounted(() => {
             <textarea
               v-model="activeText"
               class="mj-worldset-input"
+              :class="{ 'mj-worldset-input--short': activeTab === 'storyOutline' }"
+              :placeholder="activeTab === 'storyOutline' ? OUTLINE_PLACEHOLDER : ''"
               spellcheck="false"
             />
 
@@ -357,6 +372,11 @@ onUnmounted(() => {
   line-height: 1.6;
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   resize: none;
+}
+
+/* 剧情脉络通常是几句话，不必占满整屏高度 */
+.mj-worldset-input--short {
+  min-height: 160px;
 }
 
 .mj-worldset-input:focus {

@@ -399,10 +399,17 @@ export interface BattleResult {
   protagonistMpPercent: number;
   elixirsUsed: { name: string; count: number }[];
   enemiesKilled: string[];
+  /**
+   * 倒地但**生死未定**的敌人：结算时不再直接判死，
+   * 交给战后处置（玩家表态 → AI 写剧情 → 状态 AI 死亡事件）决定。
+   */
+  enemiesDowned?: string[];
   triggerReason: string;
   allyNames: string[];
   enemyNames: string[];
   triggerKind: "active" | "passive";
+  /** 战斗性质：kill=死斗（血量归零者 70% 存活）、spar=切磋（不死人）。 */
+  lethality?: "kill" | "spar";
   /** 战斗胜利时从每个被击杀敌人身上随机缴获的一件法宝/功法（纯游戏性，不经 AI）。 */
   loot: LootEntry[];
   /** 主角在战斗中身亡（仅正常/困难难度下战败时为 true；简单模式主角不会死亡）。 */

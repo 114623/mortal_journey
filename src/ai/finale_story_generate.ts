@@ -1,4 +1,5 @@
 import { FINALE_STORY_SYSTEM_PRESET } from "./finale_story_preset";
+import { formatStoryOutline } from "./story_preset";
 import { getWorldPreset } from "../role_core/worldSettingsStore";
 import {
   completeChatWithMessagesJson,
@@ -114,6 +115,9 @@ export function buildFinaleStoryRequestPayload(input: FinaleStoryInput): JsonCha
   }
 
   const systemParts = [getWorldPreset().preset, FINALE_STORY_SYSTEM_PRESET];
+  // 玩家写的剧情脉络（非空才注入），收尾时尽量呼应。
+  const outline = formatStoryOutline(getWorldPreset());
+  if (outline) systemParts.push(outline);
   if (storyParts.length > 0) {
     systemParts.push("【主角的一生轨迹】\n" + storyParts.join("\n\n---\n\n"));
   }

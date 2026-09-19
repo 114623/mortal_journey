@@ -123,6 +123,9 @@ export interface BattleCombatant {
   roleHint: string;
 }
 
+/** 战斗性质：**死斗**（会出人命）或**切磋**（点到为止，不会死人）。 */
+export type BattleLethality = "kill" | "spar";
+
 export interface BattleTriggerEntry {
   shouldEnterBattle: boolean;
   triggerKind: "active" | "passive";
@@ -130,6 +133,11 @@ export interface BattleTriggerEntry {
   allies: BattleCombatant[];
   enemies: BattleCombatant[];
   isTestBattle?: boolean;
+  /**
+   * 战斗性质：kill=死斗（血量归零者 70% 存活、30% 真死），spar=切磋（血量归零不死）。
+   * 缺省按 kill 处理（保持旧行为）。
+   */
+  lethality?: BattleLethality;
 }
 
 /** 四个倾向的玩家行动建议（由状态 AI 顺便输出，供快捷选择）。 */
@@ -408,7 +416,9 @@ function parseBattleTrigger(raw: string): BattleTriggerEntry | null {  const tex
   const allies = Array.isArray(o.allies) ? parseCombatantList(o.allies) : [];
   const enemies = Array.isArray(o.enemies) ? parseCombatantList(o.enemies) : [];
   if (allies.length === 0 || enemies.length === 0) return null;
-  return { shouldEnterBattle: true, triggerKind, triggerReason, allies, enemies };
+  // 战斗性质：仅 "spar" 视为切磋，其余（含缺省）一律死斗。
+  const lethality: BattleLethality = o.lethality === "spar" ? "spar" : "kill";
+  return { shouldEnterBattle: true, triggerKind, triggerReason, allies, enemies, lethality };
 }
 
 /**

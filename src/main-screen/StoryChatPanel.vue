@@ -5,6 +5,8 @@ import { useApiConfig } from "../ai/useApiConfig";
 import { generateStory, type StoryChatEntry } from "../ai/story_generate";
 import { generateState, type StateParsed, type BattleTriggerEntry } from "../ai/state_generate";
 import { generateCultivationStory } from "../ai/cultivation_story_generate";
+import { generateBattleStory } from "../ai/battle_story_generate";
+import { generateBattleChoices } from "../ai/battle_choice_generate";
 import { generateFinaleStory } from "../ai/finale_story_generate";
 import { generateGrandSummary } from "../ai/grand_summary_generate";
 import { generateNpcReevaluation } from "../ai/npc_reevaluation_generate";
@@ -93,6 +95,11 @@ function beginGenerating(): void {
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const pendingBattleTrigger = ref<BattleTriggerEntry | null>(null);
 const battlePending = computed(() => pendingBattleTrigger.value !== null);
+/**
+ * 战后等待玩家表态的战况（非 null = 战斗已结束、正在等玩家点处置建议或自己写一句）。
+ * 为 null 时走常规对话链路。
+ */
+const pendingBattleResult = ref<BattleResult | null>(null);
 
 function autoResizeTextarea(): void {
   const el = textareaRef.value;
@@ -226,6 +233,10 @@ interface RoundContext {
   kind: RoundKind;
   userContent: string;
   cultivationInput?: CultivationInput;
+  /** 战斗回合的战况（供「战后战斗描写」专用链路使用）。 */
+  battleResult?: BattleResult | null;
+  /** 玩家在战后的处置表态（点选的建议或自写的一句话）。 */
+  playerChoice?: string;
 }
 
 /** 一轮「生成前」的完整状态快照，用于重试时回退该轮的全部副作用。 */
@@ -554,6 +565,19 @@ async function handleSend(): Promise<void> {
   inputText.value = "";
   if (textareaRef.value) textareaRef.value.style.height = "auto";
 
+  // 战后处置待表态：玩家这句话就是处置意见，带上战况一起生成战后剧情。
+  const pending = pendingBattleResult.value;
+  if (pending) {
+    pendingBattleResult.value = null;
+    await runStoryGenerationRound({
+      kind: "battle",
+      userContent: msg,
+      battleResult: pending,
+      playerChoice: msg,
+    });
+    return;
+  }
+
   await runStoryGenerationRound({ kind: "chat", userContent: msg });
 }
 
@@ -562,7 +586,7 @@ async function handleSend(): Promise<void> {
  *
  * 三个入口共用此函数：
  * - handleSend（普通对话）：kind="chat"，用 generateStory。
- * - 战斗结果回写：kind="battle"，用 generateStory。
+ * - 战斗结果回写：kind="battle"，用 generateBattleStory（战后战斗描写，需 battleResult）。
  * - 修炼回写：kind="cultivation"，用 generateCultivationStory（需要 cultivationInput）。
  *
  * 在 push 用户消息之前捕获完整快照到 `lastPreGenSnapshot`，供重试回退使用。
@@ -602,7 +626,21 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
   try {
     // 阶段 1：生成剧情正文（修炼走 generateCultivationStory，其余走 generateStory）。
     let storyBody: string;
-    if (ctx.kind === "cultivation" && ctx.cultivationInput) {
+    if (ctx.kind === "battle" && ctx.battleResult) {
+      // 战后：由专用链路把战况"描写"成一段交手剧情，而不是复述胜/败结论。
+      const battleResult = await generateBattleStory({
+        apiUrl: url,
+        apiKey: String(apiKey.value || "").trim() || undefined,
+        model,
+        battleResult: ctx.battleResult,
+        playerChoice: ctx.playerChoice,
+        protagonist: p,
+        npcSnapshot: buildSceneNpcSnapshot() || undefined,
+        chatHistory,
+        signal: ac.signal,
+      });
+      storyBody = battleResult.storyBody;
+    } else if (ctx.kind === "cultivation" && ctx.cultivationInput) {
       const ci = ctx.cultivationInput;
       const cultResult = await generateCultivationStory({
         apiUrl: url,
@@ -885,6 +923,15 @@ function formatBattleResultMessage(r: BattleResult): string {
   return parts.join("");
 }
 
+/**
+ * 战后用户气泡：只陈述**战况事实**，不写胜负结论——
+ * 胜负由随后的「战斗描写」剧情自然呈现（见 battle_story_preset）。
+ */
+function formatBattleRecordMessage(r: BattleResult): string {
+  const kind = r.lethality === "spar" ? "切磋" : "死斗";
+  return `【战罢】与${r.enemyNames.join("、")}的一场${kind}，交手 ${r.actionCount} 回合。`;
+}
+
 function formatCultivationMessage(input: CultivationInput): string {
   const years = Math.floor(input.estimatedMonths / 12);
   const months = input.estimatedMonths % 12;
@@ -924,12 +971,43 @@ watch(
         generating.value = false;
         hasRetryable.value = false;
       }
-    } else {
-      await runStoryGenerationRound({
-        kind: "battle",
-        userContent: formatBattleResultMessage(result),
-      });
+      return;
     }
+
+    // 战后先给处置建议、等玩家表态（点选或自己写一句），再据此描写战斗收场；
+    // 生成失败（无选项）则直接输出，不卡住玩家。
+    pendingBattleResult.value = result;
+    beginGenerating();
+    let choices = null;
+    const pNow = protagonist.value;
+    try {
+      if (pNow) {
+        choices = await generateBattleChoices({
+          apiUrl: String(apiUrl.value || "").trim(),
+          apiKey: String(apiKey.value || "").trim() || undefined,
+          model: String(apiModel.value || "").trim(),
+          battleResult: result,
+          protagonist: pNow,
+          chatHistory: buildChatHistory(),
+        });
+      }
+    } catch {
+      choices = null;
+    }
+
+    if (choices) {
+      actionOptions.value = choices;
+      generating.value = false;
+      return;
+    }
+
+    // 没有选项 → 直接输出战后描写（等玩家未表态，倒地者生死留白）。
+    pendingBattleResult.value = null;
+    await runStoryGenerationRound({
+      kind: "battle",
+      userContent: formatBattleRecordMessage(result),
+      battleResult: result,
+    });
   },
 );
 </script>
@@ -1030,6 +1108,10 @@ watch(
           <span>游戏结束 · {{ gameOverReason }}</span>
         </div>
         <div v-else class="main-panel__composer">
+          <!-- 战后处置：提示玩家点选处置建议，或自己写一句 -->
+          <p v-if="pendingBattleResult" class="main-panel__postbattle-hint">
+            战斗结束 · 选择如何处置下方敌人（也可直接在输入框写下你的做法，如「饶你一命，快滚吧」）
+          </p>
           <div
             v-if="actionOptions && phase === 'ready'"
             class="main-panel__action-options"

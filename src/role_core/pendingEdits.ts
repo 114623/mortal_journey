@@ -338,7 +338,12 @@ export function restorePendingEdits(raw: unknown): void {
   if (o.worldSettings && typeof o.worldSettings === "object") {
     const w = o.worldSettings as Partial<WorldSettingsText>;
     if (typeof w.worldView === "string" && typeof w.rules === "string" && typeof w.preset === "string") {
-      pendingWorldSettings.value = { worldView: w.worldView, rules: w.rules, preset: w.preset };
+      pendingWorldSettings.value = {
+        worldView: w.worldView,
+        rules: w.rules,
+        preset: w.preset,
+        storyOutline: typeof w.storyOutline === "string" ? w.storyOutline : "",
+      };
     }
   }
 }

@@ -39,6 +39,42 @@ export interface SettleBattleOptions {
   companionsCanDie?: boolean;
 }
 
+/**
+ * 死斗中**胜方**血量归零者的存活概率（2026-09 规则）。
+ *
+ * 七成留一条命（重伤昏死 / 被同伴抢回），三成真死。
+ * 注意：只有胜方享有这七成；败方倒下者没有优待（见 {@link resolveFate}）。
+ */
+export const DEATH_MATCH_SURVIVE_RATE = 0.7;
+
+/** 掷一次生死：true = 活下来。 */
+function rollSurvives(rate = DEATH_MATCH_SURVIVE_RATE): boolean {
+  return Math.random() < rate;
+}
+
+/**
+ * 血量归零者的生死判定。
+ *
+ * - **切磋（spar）**：点到为止，任何人血量归零都不会死（昏厥 / 认输 / 被扶起）。
+ * - **死斗（kill）· 胜方**：七成存活（重伤）、三成真死。
+ * - **死斗（kill）· 败方**：无优待，倒下即真死。
+ * - 难度开关优先：`canDie=false`（简单模式）时必不死亡。
+ *
+ * 注：**敌方倒下者不在结算时判生死**——交由战后的处置环节决定
+ * （玩家选"饶命 / 补刀 / 索取财物"，由 AI 写进剧情，再经状态 AI 的
+ * `<MJ_NPC_CORE_CHANGE_TAG>` 死亡事件落地），见 `enemiesDowned`。
+ */
+export function resolveFate(
+  isSpar: boolean,
+  canDie: boolean,
+  isWinner: boolean,
+): "alive" | "dead" {
+  if (isSpar) return "alive";
+  if (!canDie) return "alive";
+  if (!isWinner) return "dead";
+  return rollSurvives() ? "alive" : "dead";
+}
+
 export function settleBattle(state: BattleState, opts?: SettleBattleOptions): BattleResult {
   const trigger = state.triggerEntry as BattleTriggerEntry;
   const protagonistCombatant = state.allies.find(a => a.isProtagonist);
@@ -46,6 +82,10 @@ export function settleBattle(state: BattleState, opts?: SettleBattleOptions): Ba
   const enemiesKilled: string[] = [];
   const protagonistCanDie = opts?.protagonistCanDie ?? true;
   const companionsCanDie = opts?.companionsCanDie ?? true;
+  // 战斗性质：spar=切磋（不死人），kill=死斗。缺省按死斗。
+  const isSpar = trigger.lethality === "spar";
+  /** 主角一方是否获胜——只有胜方倒下者才享 70% 存活（重伤）。 */
+  const isVictory = state.phase === "victory";
 
   const elixirMap = new Map<string, number>();
   for (const ally of state.allies) {
@@ -60,23 +100,34 @@ export function settleBattle(state: BattleState, opts?: SettleBattleOptions): Ba
     if (count > 0) elixirsUsed.push({ name, count });
   }
 
+  // 敌方倒下者**不在结算时判生死**：留给战后处置（玩家表态 → AI 写剧情 → 状态 AI 落地）。
+  // 这里只统计名单，并保底 1 HP，避免他们以 0 血"活着"造成 UI 与快照歧义。
+  const enemiesDowned: string[] = [];
   for (const enemy of state.enemies) {
     if (enemy.isDead && enemy.sourceNpcName) {
-      enemiesKilled.push(enemy.sourceNpcName);
+      enemiesDowned.push(enemy.sourceNpcName);
     }
   }
 
   const p = protagonist.value;
   let protagonistDied = false;
   if (p && protagonistCombatant) {
-    if (state.phase === "defeat") {
-      if (protagonistCanDie) {
-        // 正常/困难：主角身亡。HP 归零，标记死亡（由 App.vue 路由到结局页）。
+    // 主角被打下（战败，或虽胜但本人已倒下）时按战斗性质判生死。
+    const protagonistDown = state.phase === "defeat" || protagonistCombatant.isDead;
+    if (protagonistDown) {
+      const fate = resolveFate(isSpar, protagonistCanDie, isVictory);
+      if (fate === "dead") {
+        // 死斗败方（或胜方那三成）：主角身亡，HP 归零（由 App.vue 路由到结局页）。
         p.setCurrentHpMp(0, 0);
         protagonistDied = true;
       } else {
-        // 简单：主角不会死亡，侥幸生还（保留原有 1 HP 复活语义）。
+        // 切磋 / 死斗胜方七成：侥幸生还，保底 1 HP。
         p.setCurrentHpMp(1, Math.max(0, Math.round(p.maxMp * 0.1)));
+        gameLog.info(
+          isSpar
+            ? "[战斗结算] 切磋之战，主角落败但无性命之忧。"
+            : "[战斗结算] 死斗之中主角重伤倒地，侥幸留得性命。",
+        );
       }
     } else {
       const hpPct = protagonistCombatant.stats.maxHp > 0
@@ -112,12 +163,12 @@ export function settleBattle(state: BattleState, opts?: SettleBattleOptions): Ba
     if (enemy.isDead && enemy.sourceNpcName) {
       const npc = npcStore.getNpc(enemy.sourceNpcName);
       if (npc) {
-        // 战斗结算是受控的程序逻辑，直接赋值（不构成数据漂移）。
-        // 与 applyCoreChange 的 death 事件语义保持一致：死亡时清零 HP。
-        npc.isDead = true;
-        npc.currentHp = 0;
+        // 倒地但生死未定：不标记死亡，保底 1 HP（重伤昏厥）。
+        // 是否补刀由战后处置决定——玩家的处置语句写进剧情后，
+        // 由状态 AI 的 <MJ_NPC_CORE_CHANGE_TAG> 死亡事件落地。
+        npc.setCurrentHpMp(1, npc.currentMp);
 
-        // 战利品掉落：每个被击杀敌人随机掉落一件法宝/功法（纯游戏性，不经 AI）。
+        // 战利品：胜利方搜刮倒地敌人（纯游戏性，不经 AI，与其是否身亡无关）。
         if (state.phase === "victory" && lootRecipient) {
           const rolled = rollLootFromNpc(npc);
           if (rolled) {
@@ -143,11 +194,11 @@ export function settleBattle(state: BattleState, opts?: SettleBattleOptions): Ba
     if (!npc) continue;
 
     if (ally.isDead) {
-      if (companionsCanDie) {
+      // 队友生死：胜方倒下七成活（重伤），败方倒下（死斗）真死；切磋必活。
+      if (resolveFate(isSpar, companionsCanDie, isVictory) === "dead") {
         npc.isDead = true;
         npc.currentHp = 0;
       } else {
-        // 简单模式：队友不会死亡，勉强生还（HP 保底 1）。
         npc.setCurrentHpMp(1, npc.currentMp);
       }
     } else {
@@ -172,10 +223,13 @@ export function settleBattle(state: BattleState, opts?: SettleBattleOptions): Ba
     protagonistMpPercent: protagonistCombatant ? Math.round(protagonistCombatant.mp / Math.max(1, protagonistCombatant.stats.maxMp) * 100) : 0,
     elixirsUsed,
     enemiesKilled,
+    /** 倒地但生死未定的敌人：交由战后处置决定（不再在结算时判死）。 */
+    enemiesDowned,
     triggerReason: trigger.triggerReason,
     allyNames: trigger.allies.map(a => a.displayName),
     enemyNames: trigger.enemies.map(e => e.displayName),
     triggerKind: trigger.triggerKind,
+    lethality: isSpar ? "spar" : "kill",
     loot,
     protagonistDied,
   };

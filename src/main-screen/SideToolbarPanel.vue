@@ -7,6 +7,7 @@ import CharacterArchiveModal from "./CharacterArchiveModal.vue";
 import WorldSettingsModal from "./WorldSettingsModal.vue";
 import ItemForgeModal from "./ItemForgeModal.vue";
 import SaveLoadModal from "./SaveLoadModal.vue";
+import SettingsModal from "./SettingsModal.vue";
 import type { MjSavePayload } from "../save/gameSave";
 import { writeActiveSave } from "../save/gameSave";
 import { gameLog } from "../log/gameLog";
@@ -32,8 +33,11 @@ const mapModalOpen = ref(false);
 const alchemyModalOpen = ref(false);
 const archiveModalOpen = ref(false);
 const worldSettingsOpen = ref(false);
+/** 打开世界设定时默认落在哪个标签页；「剧情脉络」入口传 storyOutline。 */
+const worldSettingsTab = ref<"worldView" | "rules" | "preset" | "storyOutline">("worldView");
 const forgeModalOpen = ref(false);
 const saveLoadOpen = ref(false);
+const settingsOpen = ref(false);
 
 /** 各类待回合结束才生效的改动条数（显示在对应按钮上）。 */
 const queuedProfiles = computed(() => pendingProfileCount.value);
@@ -55,7 +59,8 @@ function closeArchiveModal() {
   archiveModalOpen.value = false;
 }
 
-function openWorldSettings() {
+function openWorldSettings(tab: "worldView" | "rules" | "preset" | "storyOutline" = "worldView") {
+  worldSettingsTab.value = tab;
   worldSettingsOpen.value = true;
 }
 
@@ -97,6 +102,14 @@ function closeSaveLoadModal() {
   saveLoadOpen.value = false;
 }
 
+function openSettingsModal() {
+  settingsOpen.value = true;
+}
+
+function closeSettingsModal() {
+  settingsOpen.value = false;
+}
+
 /** 读取另一个人生：先把当前进度落盘（避免丢档），再交给 App 切换。 */
 function onLoadSave(value: { id: string; payload: MjSavePayload }): void {
   saveLoadOpen.value = false;
@@ -117,12 +130,14 @@ function onLoadSave(value: { id: string; payload: MjSavePayload }): void {
         <button type="button" class="main-screen__btn side-btn" @click="openArchiveModal">
           人物档案<span v-if="queuedProfiles > 0" class="side-btn__badge">{{ queuedProfiles }}</span>
         </button>
-        <button type="button" class="main-screen__btn side-btn" @click="openWorldSettings">
-          世界设定<span v-if="queuedWorld > 0" class="side-btn__badge">{{ queuedWorld }}</span>
+        <button type="button" class="main-screen__btn side-btn" @click="openWorldSettings('storyOutline')">
+          剧情脉络<span v-if="queuedWorld > 0" class="side-btn__badge">{{ queuedWorld }}</span>
         </button>
+        <button type="button" class="main-screen__btn side-btn" @click="openWorldSettings()">世界设定<span v-if="queuedWorld > 0" class="side-btn__badge">{{ queuedWorld }}</span></button>
         <button type="button" class="main-screen__btn side-btn" @click="openForgeModal">天道编辑</button>
         <button type="button" class="main-screen__btn side-btn" @click="openAlchemyModal">炼丹</button>
         <button type="button" class="main-screen__btn side-btn" @click="emit('testBattle')" :disabled="props.testDisabled">战斗测试</button>
+        <button type="button" class="main-screen__btn side-btn" @click="openSettingsModal">设置</button>
       </div>
 
       <div class="side-autosave">
@@ -173,6 +188,7 @@ function onLoadSave(value: { id: string; payload: MjSavePayload }): void {
     />
     <WorldSettingsModal
       :open="worldSettingsOpen"
+      :initial-tab="worldSettingsTab"
       @close="closeWorldSettings"
     />
     <ItemForgeModal
@@ -183,6 +199,10 @@ function onLoadSave(value: { id: string; payload: MjSavePayload }): void {
       :open="saveLoadOpen"
       @close="closeSaveLoadModal"
       @load="onLoadSave"
+    />
+    <SettingsModal
+      :open="settingsOpen"
+      @close="closeSettingsModal"
     />
   </section>
 </template>

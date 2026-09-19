@@ -255,7 +255,8 @@
 .main-panel__story-prose {
   margin: 0;
   font-family: var(--mj-font-story);
-  font-size: 1rem;
+  /* 字号可被「设置 → 剧情字体大小」缩放（见 uiSettingsStore） */
+  font-size: calc(1rem * var(--mj-story-font-scale, 1));
   line-height: 1.9;
   color: var(--mj-fg);
   white-space: pre-wrap;
@@ -368,6 +369,19 @@
 .main-panel__input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 战后处置提示条：提示玩家点选处置建议或自己写一句 */
+.main-panel__postbattle-hint {
+  flex: 0 0 100%;
+  margin: 0 0 4px;
+  padding: 6px 10px;
+  border: 1px solid rgba(198, 122, 58, 0.35);
+  border-radius: 6px;
+  background: rgba(198, 122, 58, 0.12);
+  color: #e8c5a0;
+  font-size: 0.78rem;
+  line-height: 1.45;
 }
 
 /* ───────────────────────────────────────────────────────────────── */

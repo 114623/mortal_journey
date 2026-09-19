@@ -286,6 +286,15 @@ const STATE_TAIL = `
       · 妖兽（兽形）：体型、毛色/鳞色、头角/翅膀/尾巴、眼瞳、显著特征。
     - clothing：服装特征（服装类型如道袍/劲装/儒衫、主色调、纹样、配饰）。修仙者与人形妖兽必填；兽形"妖兽"留空字符串即可。
   9.3 修炼信息：realm（境界，含 major 和 minor）、linggen（灵根，从金木水火土中选择1-4个）。
+      【灵根与剧情定位相称·重要】灵根好坏由该人物在剧情中的定位决定，不是随机撒：
+      - 剧情正文已明示其灵根/资质（"天生水灵根之体""五灵根废材"）→ 逐字采用，元素与描写一致；
+      - 圣女/天骄/真传/主角气运之子级别 → 1 个元素（天灵根，如 ["水"]）；
+      - 内门精英/核心弟子/长辈强者 → 1~2 个元素；
+      - 普通弟子/散修/普通修士 → 2~3 个元素；
+      - 杂役/仆从/资质平庸者 → 4 个元素（伪灵根）；
+      - 凡人 NPC（未引气入体）→ 绝大多数 linggen 留空 []（无灵根）；少数剧情铺垫"身怀灵根尚未入门"的可给 4 个元素；
+      - 禁止给路人/杂役/凡人安排天灵根；禁止全员天灵根。剧情刻意安排的例外（如扮猪吃虎的老怪）允许，但须有剧情支撑。
+      - 灵根元素可与其功法体系/剧情暗示呼应（如修水系功法者灵根含水）。
   9.4 装备槽 equippedSlots：最多4个法宝，其中至少1个为攻击性法宝如剑、刀等。
   9.5 功法槽 gongfaSlots：长度8，须含攻击类功法，每个功法含 bonus、system、role。
   9.6 储物袋 inventorySlots：最多12格。
@@ -426,12 +435,19 @@ const STATE_TAIL = `
 6. triggerKind 含义："active"表示主角主动开战（user 明确下令攻击/除敌），"passive"表示被迫应战（对方先动手、遭伏击、无可退避）。
 7. 输出边界：战斗触发标签只用于程序进入战斗结算，不在标签外撰写战果；若未满足触发条件，不得输出 <BATTLE_TRIGGER_TAG>。
 8. 无战斗时不得输出第七对标签。
-  8.1 触发战斗时，enemies 中的每个 displayName 必须在本回合 <NPC_NEARBY_TAG> 中有对应条目（含完整角色卡）。
-  8.2 若该敌人之前不存在于快照中，须在本回合 <NPC_NEARBY_TAG> 中新生成其角色卡。
-  8.3 程序通过 displayName 匹配参战者，若 NPC 列表中找不到对应名称，战斗将无法初始化。
-9. 对峙不等于开战：敌对单位已在周围人物中，但未满足"动手已发生或不可避免"时（尤其突发遭遇首段），不输出第七对标签；待玩家下回合表态或叙事推进到战备段与动手条件齐备后再输出。
-10. 示例（剧情已开战；displayName 须与快照或本回合 NPC 列表一致）：
-<BATTLE_TRIGGER_TAG>{"shouldEnterBattle":true,"triggerKind":"passive","triggerReason":"墨牙狼突袭，不得不接战","allies":[{"displayName":"韩立","roleHint":"主角"}],"enemies":[{"displayName":"墨牙狼","roleHint":"敌方"}]}</BATTLE_TRIGGER_TAG>
+9. 战斗性质字段 lethality（**必须输出**）：取值 "kill"（死斗）或 "spar"（切磋），缺省按死斗处理。判定标准：
+  9.1 "kill" 死斗：生死相搏、不死不休、对方要杀主角（或主角要杀对方）、妖兽捕食、仇杀截杀、正邪死战，或剧情中出现杀意、灭口、拼命等表述。
+  9.2 "spar" 切磋：同门试招、友谊切磋、宗门大比与擂台较技、长辈考校、赌斗约战点到为止、活捉生擒、只想教训或制服对方，或剧情明确写了"不取性命/留手/点到为止"。
+  9.3 依据是**本回合剧情对这场冲突的定性**（双方意图与关系），不是境界高低或战斗规模。
+      例：同门弟子因口角动手 → "spar"；散修为夺宝下杀手 → "kill"。
+  9.4 影响：切磋双方血量归零都不会死；死斗中血量归零者有七成几率活下来（三成真死）。
+10. 名单落点：触发战斗时，enemies 中的每个 displayName 必须在本回合 <NPC_NEARBY_TAG> 中有对应条目（含完整角色卡）。
+  10.1 若该敌人之前不存在于快照中，须在本回合 <NPC_NEARBY_TAG> 中新生成其角色卡。
+  10.2 程序通过 displayName 匹配参战者，若 NPC 列表中找不到对应名称，战斗将无法初始化。
+11. 对峙不等于开战：敌对单位已在周围人物中，但未满足"动手已发生或不可避免"时（尤其突发遭遇首段），不输出第七对标签；待玩家下回合表态或叙事推进到战备段与动手条件齐备后再输出。
+12. 示例（剧情已开战；displayName 须与快照或本回合 NPC 列表一致）：
+<BATTLE_TRIGGER_TAG>{"shouldEnterBattle":true,"triggerKind":"passive","lethality":"kill","triggerReason":"墨牙狼突袭，不得不接战","allies":[{"displayName":"韩立","roleHint":"主角"}],"enemies":[{"displayName":"墨牙狼","roleHint":"敌方"}]}</BATTLE_TRIGGER_TAG>
+12.1 同门切磋示例：<BATTLE_TRIGGER_TAG>{"shouldEnterBattle":true,"triggerKind":"active","lethality":"spar","triggerReason":"与赵鸣同门试招，点到为止","allies":[{"displayName":"韩立","roleHint":"主角"}],"enemies":[{"displayName":"赵鸣","roleHint":"敌方"}]}</BATTLE_TRIGGER_TAG>
 
 [剧情快照规则]
 1. 将当前轮的剧情正文精炼为一段2~3句的简述，用于后续剧情生成时替代完整剧情文本。
@@ -464,7 +480,7 @@ const STATE_TAIL = `
 8. <ITEM_REMOVE_TAG>物品减少</ITEM_REMOVE_TAG>
 9. <NPC_NEARBY_TAG>周围人物列表（已存在 NPC 仅含 dynamic 字段，核心字段须冻结）</NPC_NEARBY_TAG>
 10. <MJ_NPC_CORE_CHANGE_TAG>NPC 核心字段变更事件（绝大多数回合为 []）</MJ_NPC_CORE_CHANGE_TAG>
-11. <BATTLE_TRIGGER_TAG>战斗触发（未满足触发条件时不输出此标签）</BATTLE_TRIGGER_TAG>
+11. <BATTLE_TRIGGER_TAG>战斗触发（须含 lethality：kill=死斗 / spar=切磋；未满足触发条件时不输出此标签）</BATTLE_TRIGGER_TAG>
 12. <mj_story_snapshot>剧情快照（本轮剧情的2~3句简述）</mj_story_snapshot>
 13. <MJ_ACTION_OPTIONS_TAG>四个倾向的行动建议（激进/中庸/谨慎/最谨慎）</MJ_ACTION_OPTIONS_TAG>
 禁止缺少第1~10段和第12~13段标签；第11段仅在满足战斗触发条件时输出。无数据的标签输出空对象 {}（数组型标签输出 []）。禁止改写标签名的大小写或字符；禁止用 Markdown 代码围栏包裹标签。

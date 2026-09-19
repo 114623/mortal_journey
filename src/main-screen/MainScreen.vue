@@ -202,6 +202,8 @@ function startTestBattle() {
     ],
     enemies: TEST_ENEMY_DUMMY_NAMES.map((n) => ({ displayName: n, roleHint: "敌人" })),
     isTestBattle: true,
+    // 战斗测试一律按切磋处理：打输了不会把存档玩死。
+    lethality: "spar",
   });
 }
 </script>

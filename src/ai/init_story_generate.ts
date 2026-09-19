@@ -1,4 +1,5 @@
 import { INIT_STORY_SYSTEM_PRESET } from "./init_story_preset";
+import { formatStoryOutline } from "./story_preset";
 import { getWorldPreset } from "../role_core/worldSettingsStore";
 import { completeChatWithMessagesJson, type JsonChatRequestPayload } from "./openAiChatBridge";
 import { Protagonist } from "../role_core/Protagonist";
@@ -111,7 +112,17 @@ export function buildInitStoryRequestPayload(input: InitStoryGenerateInput): Jso
     apiKey: input.apiKey,
     model: input.model,
     messages: [
-      { role: "system", content: [getWorldPreset().preset, INIT_STORY_SYSTEM_PRESET].join("\n\n") },
+      {
+        role: "system",
+        content: [
+          getWorldPreset().preset,
+          INIT_STORY_SYSTEM_PRESET,
+          // 玩家写的剧情脉络（非空才注入），让开局就朝期望方向起步。
+          formatStoryOutline(getWorldPreset()),
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+      },
       { role: "user", content: userContent },
     ],
     temperature: DEFAULT_INIT_STORY_TEMPERATURE,

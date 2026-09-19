@@ -1,4 +1,5 @@
 import { CULTIVATION_STORY_SYSTEM_PRESET } from "./cultivation_story_preset";
+import { formatStoryOutline } from "./story_preset";
 import { getWorldPreset } from "../role_core/worldSettingsStore";
 import {
   completeChatWithMessagesJson,
@@ -162,6 +163,9 @@ export function buildCultivationStoryRequestPayload(input: CultivationStoryInput
   }
 
   const systemParts = [getWorldPreset().preset, CULTIVATION_STORY_SYSTEM_PRESET];
+  // 玩家写的剧情脉络（非空才注入），闭关期间也朝期望方向推进。
+  const outline = formatStoryOutline(getWorldPreset());
+  if (outline) systemParts.push(outline);
   if (storyParts.length > 0) {
     systemParts.push("【之前的剧情】\n" + storyParts.join("\n\n---\n\n"));
   }

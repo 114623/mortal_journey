@@ -65,6 +65,12 @@ const targetTeam = computed((): "ally" | "enemy" => {
   return "enemy";
 });
 
+/** 本场战斗性质：切磋（不死人）/ 死斗（血量归零七成存活）。 */
+const lethality = computed<"kill" | "spar">(() => {
+  const t = state.value?.triggerEntry as { lethality?: unknown } | undefined;
+  return t?.lethality === "spar" ? "spar" : "kill";
+});
+
 function onNormalAttack() {
   selectAction({ type: "normalAttack", targetId: "" });
 }
@@ -220,6 +226,15 @@ function toggleElixirSubmenu() {
             <template v-else-if="state">
             <header class="battle__header">
               <h2 class="battle__title">⚔ 战斗 — 行动 {{ state.actionCount }}</h2>
+              <span
+                class="battle__lethality"
+                :class="lethality === 'spar' ? 'battle__lethality--spar' : 'battle__lethality--kill'"
+                :title="
+                  lethality === 'spar'
+                    ? '切磋：点到为止，本场无人会死'
+                    : '死斗：血量归零者七成留得性命、三成真死'
+                "
+              >{{ lethality === 'spar' ? '切磋' : '死斗' }}</span>
               <span class="battle__phase">
                 <template v-if="isPlayerTurn">你的回合</template>
                 <template v-else-if="isTargetSelection">选择目标</template>
