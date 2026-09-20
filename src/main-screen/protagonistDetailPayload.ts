@@ -17,11 +17,13 @@ import type { CultivationRealm, EquipSlotKey, PrimaryStatKey, TraitEntry } from 
 import { PRIMARY_STAT_KEY_TO_ZH } from "../role_core/types/playInfo";
 import type { TreasureSpecialEffect, TreasureConversion, TreasureConversionEffect } from "../role_core/types/treasure";
 import { TREASURE_MODIFIER_NAMES } from "../role_core/types/treasure";
-import { resolveItemTier, tierLabel, describeTierSuppression, describeElixirTierSuppression, applyElixirTierSuppression } from "../role_core/types/itemTier";
+import { resolveItemTier, tierLabel, describeTierSuppression, describeElixirTierSuppression, applyElixirTierSuppression, describeGongfaCultivation } from "../role_core/types/itemTier";
 import type { GongfaSpecialEffect } from "../role_core/types/gongfa";
-import { resolveGongfaEffectDisplay } from "../role_core/types/gongfa";
+import { resolveGongfaEffectDisplay, resolveGongfaLayer10 } from "../role_core/types/gongfa";
 import { gradeToTraitRarity, getGongfaMasteryProgress } from "./protagonistPanelDisplay";
-import { GONGFA_MASTERY_COMBAT_MULT, GONGFA_MASTERY_ATTRI_MULT, getItemSellPrice } from "../role_core/types/gameConstants";
+import { getItemSellPrice } from "../role_core/types/gameConstants";
+import { gongfaCombatMult, gongfaAttriMultOf, gongfaMaxLayerOf, clampGongfaMastery } from "../role_core/realmUtils";
+import { protagonist } from "../role_core/Protagonist";
 import type { ItemGrade } from "../role_core/types/itemInfo";
 import { describeTraitEffect } from "../fate_choice/traitEffect";
 
@@ -48,6 +50,7 @@ function pushSpecialEffectSection(
   derivedStatsGetter?: () => DerivedStatValues,
   mastery?: number,
   cooldownReduce?: number,
+  maxLayer: number = 10,
 ): void {
   if (!fn) return;
   out.push({
@@ -59,10 +62,12 @@ function pushSpecialEffectSection(
           if (!ds) return 0;
           return (ds as unknown as Record<string, number>)[key] ?? 0;
         };
+        // 战斗倍率按修炼进度比例插值，层号映射到 10 层基准曲线的连续位置。
         const masteryMult = mastery != null && mastery >= 1
-          ? GONGFA_MASTERY_COMBAT_MULT[Math.min(mastery, GONGFA_MASTERY_COMBAT_MULT.length) - 1]
+          ? gongfaCombatMult(clampGongfaMastery(mastery, maxLayer), maxLayer)
           : 1.0;
-        return resolveGongfaEffectDisplay(fn, getStat, masteryMult, mastery ?? 1, cooldownReduce ?? 0);
+        const layer10 = resolveGongfaLayer10(clampGongfaMastery(mastery ?? 1, maxLayer), maxLayer);
+        return resolveGongfaEffectDisplay(fn, getStat, masteryMult, layer10, cooldownReduce ?? 0);
       }
       if ("modifiers" in fn) {
         const tFn = fn as TreasureSpecialEffect;
@@ -244,11 +249,11 @@ function pushSec(out: ProtagonistDetailSection[], label: string, text: string | 
  * @returns 格式化后的文案，无有效项时返回 `undefined`。
  */
 function formatZhBonusWithMastery(
-  b: Record<string, number> | undefined,
-  mastery: number,
+  gf: GongfaItemDefinition,
 ): string | undefined {
+  const b = gf.bonus as Record<string, number> | undefined;
   if (!b || typeof b !== "object") return undefined;
-  const masteryMult = GONGFA_MASTERY_ATTRI_MULT[Math.min(mastery, GONGFA_MASTERY_ATTRI_MULT.length) - 1];
+  const masteryMult = gongfaAttriMultOf(gf);
   const parts = Object.entries(b).map(([k, v]) => {
     if (typeof v === "number" && !Number.isFinite(v)) return null;
     const raw = typeof v === "number" ? v : 0;
@@ -407,27 +412,38 @@ export function buildGongfaDetailPayload(
   const sections: ProtagonistDetailSection[] = [];
   pushSec(sections, "简介", gf.desc);
   pushSec(sections, "品级", gf.grade);
+  // 阶层：决定数值量级、跨阶压制与**层数上限**，是功法最核心的定位信息。
+  {
+    const obsoleteText = describeGongfaCultivation(gf.tier, protagonist.value?.realm?.major);
+    const tierText = gf.tier ? tierLabel(gf.tier) : "未定";
+    pushSec(sections, "阶层", obsoleteText ? `${tierText} · ${obsoleteText}` : tierText);
+  }
+  const maxLayer = gongfaMaxLayerOf(gf);
   {
     const mp = getGongfaMasteryProgress(gf);
-    const masteryText = mp.isMax ? "第10/10层（已满）" : `第${mp.mastery}/10层`;
-    const section: ProtagonistDetailSection = { label: "熟练等级", text: masteryText };
+    const layerText = `${mp.mastery}/${mp.maxLayer}层`;
+    const section: ProtagonistDetailSection = {
+      label: "修炼进度",
+      text: mp.isMax ? `第${layerText}（已圆满）` : `第${layerText}`,
+    };
     if (mp.isMax) {
-      section.text = "第10/10层（已满）";
+      section.text = `第${layerText}（已圆满）`;
     } else {
-      section.masteryLayer = `第${mp.mastery}/10层`;
+      section.masteryLayer = `第${layerText}`;
       section.masteryProgress = `${mp.exp}/${mp.threshold}`;
       section.progress = { current: mp.exp, max: mp.threshold, percent: mp.percent, isMax: false };
     }
     sections.push(section);
   }
   const mastery = gf.mastery ?? 1;
-  const bonus = formatZhBonusWithMastery(gf.bonus as Record<string, number>, mastery);
+  const bonus = formatZhBonusWithMastery(gf);
   if (bonus) pushSec(sections, "修炼加成", bonus);
-  pushSpecialEffectSection(sections, gf.function, gf.grade, primaryStatGetter, statNameGetter, gf.system, derivedStatsGetter, mastery, cooldownReduce);
+  pushSpecialEffectSection(sections, gf.function, gf.grade, primaryStatGetter, statNameGetter, gf.system, derivedStatsGetter, mastery, cooldownReduce, maxLayer);
+  if (gf.inheritFrom) pushSec(sections, "承继", `承「${gf.inheritFrom}」之根基`);
 
   const actions: ProtagonistDetailActionButton[] = [];
   if (source?.type === "bar") {
-    if (mastery < 10) {
+    if (mastery < maxLayer) {
       actions.push({
         label: "修炼",
         primary: true,
@@ -436,7 +452,7 @@ export function buildGongfaDetailPayload(
     }
     actions.push({
       label: "卸下",
-      primary: mastery >= 10,
+      primary: mastery >= maxLayer,
       action: { id: "unequipGongfa", gongfaIndex: source.gongfaIndex },
     });
   } else if (source?.type === "bag") {

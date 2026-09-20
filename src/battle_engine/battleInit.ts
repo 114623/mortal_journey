@@ -4,12 +4,14 @@ import type { GongfaSlotsState, EquippedSlotsState } from "../role_core/types/pl
 import type { InventoryStackItem, ElixirItemDefinition } from "../role_core/types/itemInfo";
 import type { GongfaBattleEffect, LayerValue } from "../role_core/types/gongfa";
 import type { PrimaryStatKey } from "../role_core/types/playInfo";
-import { atLayer, atLayerFloat, resolveGongfaBattleEffectDesc } from "../role_core/types/gongfa";
+import { atLayer, atLayerFloat, resolveGongfaBattleEffectDesc, resolveGongfaLayer10 } from "../role_core/types/gongfa";
 import { protagonist } from "../role_core/Protagonist";
 import { Npc } from "../role_core/Npc";
 import { npcStore } from "../role_core/npcStore";
 import { gameLog } from "../log/gameLog";
-import { GONGFA_SLOT_COUNT, GONGFA_MASTERY_COMBAT_MULT, computeLinggenCombatBonuses } from "../role_core/types/gameConstants";
+import { GONGFA_SLOT_COUNT, computeLinggenCombatBonuses } from "../role_core/types/gameConstants";
+import { gongfaMaxLayer } from "../role_core/types/itemTier";
+import { gongfaCombatMult, clampGongfaMastery } from "../role_core/realmUtils";
 import { treasureTierFactor, resolveItemTier, applyElixirTierSuppression, gongfaTierFactor } from "../role_core/types/itemTier";
 import { generateId as generateEffectId } from "./formulas";
 import { BASE_CRIT_DMG } from "./constants";
@@ -18,11 +20,16 @@ function generateId(team: "ally" | "enemy", index: number): string {
   return `${team}_${index}`;
 }
 
-function getMasteryMult(mastery?: number): number {
-  if (mastery != null && mastery >= 1) {
-    return GONGFA_MASTERY_COMBAT_MULT[Math.min(mastery, GONGFA_MASTERY_COMBAT_MULT.length) - 1];
-  }
-  return 1.0;
+/**
+ * 战斗效果倍率 + 层级曲线位置。
+ *
+ * 功法的层数上限由阶层决定（凡人3层 ~ 化神10层），故倍率按**修炼进度比例**插值，
+ * 而数值曲线的取样位置要把「第 3/5 层」映射到 10 层基准曲线的连续位置。
+ */
+function gongfaLayerContext(gf: { mastery?: number; tier?: string }): { mult: number; layer10: number } {
+  const maxLayer = gongfaMaxLayer(gf.tier);
+  const mastery = clampGongfaMastery(gf.mastery ?? 1, maxLayer);
+  return { mult: gongfaCombatMult(mastery, maxLayer), layer10: resolveGongfaLayer10(mastery, maxLayer) };
 }
 
 function bakeScalingValue(
@@ -146,10 +153,11 @@ function buildBattleSkills(
     if (!gf || !gf.function) continue;
     if (gf.function.type !== "主动") continue;
 
-    const layer = gf.mastery ?? 1;
+    // 层数上限由阶层决定：倍率按进度比例插值，数值曲线按连续层号取样。
+    const { mult, layer10: layer } = gongfaLayerContext(gf);
     // 功法阶层压制与属性加成同源：凡人武功在练气期只剩一成，筑基期归零。
     const tierMult = gongfaTierFactor(gf.tier, realmMajor);
-    const masteryMult = getMasteryMult(layer) * tierMult;
+    const masteryMult = mult * tierMult;
     const effects = gf.function.battleEffects.map(eff =>
       convertBattleEffectToSkillEffect(eff, getStat, masteryMult, layer),
     );
@@ -250,8 +258,8 @@ function extractPassiveEffects(
     if (!gf || !gf.function) continue;
     if (gf.function.type !== "被动") continue;
 
-    const layer = gf.mastery ?? 1;
-    const masteryMult = getMasteryMult(layer) * gongfaTierFactor(gf.tier, realmMajor);
+    const { mult, layer10: layer } = gongfaLayerContext(gf);
+    const masteryMult = mult * gongfaTierFactor(gf.tier, realmMajor);
     for (const eff of gf.function.battleEffects) {
       const be = convertBattleEffectToInitEffect(eff, getStat, masteryMult, layer, gf.function.name, combatantId);
       be.hidden = true;
@@ -266,7 +274,7 @@ function extractPassiveEffects(
  * 提取已装备法宝的百分比被动，并注入为战斗 modifier。
  *
  * 每条词条的数值会先按 {@link treasureTierFactor} 做跨阶压制：
- * 低阶法宝不削弱；高阶法宝被低阶修士使用时受器灵封印；凡人阶走专属衰减。
+ * 低阶法宝按 0.65^Δ 削弱；高阶法宝被低阶修士使用时受器灵封印；凡人阶走专属衰减。
  *
  * @param equippedSlots 已装备法宝槽。
  * @param combatantId 战斗单位 id。
@@ -282,7 +290,7 @@ function extractTreasurePassiveEffects(
   for (const tr of equippedSlots) {
     if (!tr || !tr.function) continue;
     if (!("modifiers" in tr.function)) continue;
-    // 法宝低阶不削弱（treasureTierFactor）：仅器灵封印（高阶）与凡人阶衰减生效。
+    // 法宝跨阶压制（treasureTierFactor）：低阶 0.65^Δ、高阶器灵封印、凡人阶专属衰减。
     const tierF = treasureTierFactor(resolveItemTier(tr.tier, tr.grade), realmMajor);
     for (const mod of tr.function.modifiers) {
       const rawType = mod.modifierType as string;

@@ -5,6 +5,7 @@
 
 import type { PrimaryStatKey } from "./types/playInfo";
 import type { GongfaItemDefinition } from "./types/itemInfo";
+import { gongfaMaxLayer, gongfaAttriCap } from "./types/itemTier";
 import {
   TABLE,
   REALM_ORDER,
@@ -14,6 +15,8 @@ import {
   MIN_NARRATIVE_AGE_BY_MAJOR,
   MAX_NARRATIVE_AGE_BY_MAJOR,
   GONGFA_MASTERY_THRESHOLDS,
+  GONGFA_COMBAT_MULT_CAP,
+  buildGongfaMasteryThresholds,
   realmStageIndex,
   type RealmPrimaryStatsRow,
   type RealmMajor,
@@ -188,38 +191,142 @@ export function getProtagonistNarrativeAge(
   return Math.max(base, floor);
 }
 
-export function getGongfaMasteryThreshold(masteryLevel: number): number {
-  if (masteryLevel < 1 || masteryLevel >= 10) return Infinity;
-  return GONGFA_MASTERY_THRESHOLDS[masteryLevel - 1];
+/** 取功法的层数上限（由阶层决定，见 `itemTier.gongfaMaxLayer`）。 */
+export function gongfaMaxLayerOf(gongfa: GongfaItemDefinition | null | undefined): number {
+  return gongfaMaxLayer(gongfa?.tier);
+}
+
+/**
+ * 第 `masteryLevel` 层升到下一层所需的经验。
+ *
+ * 阈值表按该功法的**层数上限**生成（见 `buildGongfaMasteryThresholds`）；
+ * 已达上限层返回 `Infinity`（不再累积经验）。
+ */
+export function getGongfaMasteryThreshold(masteryLevel: number, maxLayer = 10): number {
+  const m = Math.max(1, Math.floor(maxLayer));
+  if (masteryLevel < 1 || masteryLevel >= m) return Infinity;
+  const table = buildGongfaMasteryThresholds(m);
+  const v = table[masteryLevel - 1];
+  return typeof v === "number" ? v : Infinity;
+}
+
+/**
+ * 功法**主属性加成倍率**：按修炼进度比例在 [1, cap] 之间插值。
+ *
+ * `cap` 由功法阶层决定（凡人 2.5× ~ 化神 10×），满层即到顶。
+ */
+export function gongfaAttriMult(mastery: number, maxLayer: number, cap: number): number {
+  const m = Math.max(1, Math.floor(maxLayer));
+  if (m <= 1) return 1;
+  const l = Math.max(1, Math.min(mastery, m));
+  const t = (l - 1) / (m - 1);
+  return 1 + t * (Math.max(1, cap) - 1);
+}
+
+/** 功法**战斗效果倍率**：按修炼进度比例在 [1, 2.35] 之间插值（曲线本就平缓，不随阶层放大）。 */
+export function gongfaCombatMult(mastery: number, maxLayer: number): number {
+  return gongfaAttriMult(mastery, maxLayer, GONGFA_COMBAT_MULT_CAP);
+}
+
+/** 直接按功法对象取主属性倍率（内部解析层数上限与阶层封顶）。 */
+export function gongfaAttriMultOf(gongfa: GongfaItemDefinition | null | undefined): number {
+  if (!gongfa) return 1;
+  return gongfaAttriMult(gongfa.mastery ?? 1, gongfaMaxLayerOf(gongfa), gongfaAttriCap(gongfa.tier));
+}
+
+/** 直接按功法对象取战斗倍率。 */
+export function gongfaCombatMultOf(gongfa: GongfaItemDefinition | null | undefined): number {
+  if (!gongfa) return 1;
+  return gongfaCombatMult(gongfa.mastery ?? 1, gongfaMaxLayerOf(gongfa));
+}
+
+/** 把层数夹到 [1, maxLayer]（老存档层数可能超过新上限）。 */
+export function clampGongfaMastery(mastery: number, maxLayer: number): number {
+  const m = Math.max(1, Math.floor(maxLayer));
+  return Math.max(1, Math.min(Math.floor(mastery) || 1, m));
+}
+
+/**
+ * 功法的**修炼总进度**（0~1），用于跨功法比较与继承。
+ *
+ * 层内经验按当前层阈值折算，满层为 1。
+ */
+export function gongfaProgressRatio(gongfa: GongfaItemDefinition | null | undefined): number {
+  if (!gongfa) return 0;
+  const m = gongfaMaxLayerOf(gongfa);
+  if (m <= 1) return 1;
+  const l = clampGongfaMastery(gongfa.mastery ?? 1, m);
+  if (l >= m) return 1;
+  const th = getGongfaMasteryThreshold(l, m);
+  const frac = Number.isFinite(th) && th > 0 ? Math.min(1, (gongfa.masteryExp ?? 0) / th) : 0;
+  return Math.min(1, ((l - 1) + frac) / (m - 1));
+}
+
+/**
+ * 【机缘·续作继承】让后续篇功法沿用原功法的修炼进度。
+ *
+ * 场景：练气功法练到 5/5 层，机缘得到它的筑基篇——不必从第一层重练。
+ * 因两门功法层数上限不同（练气 5 层 / 筑基 6 层），按**进度比例**映射而非直接抄层数：
+ *
+ * - 连续层位置 `pos = 进度 × (上限-1)`，起始层 = `floor(pos) + 1`；
+ * - 层内经验按 `pos` 的小数部分等比写入，避免"刚好卡在新一层起点"的突变；
+ * - **保留最后一层不继承**：续篇纵有旧根基，终归是新境界的新功夫，得留一层让玩家自己练满
+ *   （源功法已圆满 → 续篇也只到「上限-1」层，不会一入手就满级）。
+ *
+ * @returns 继承后的层数与经验；源功法为空或进度为 0 时返回 null（表示无需继承）。
+ */
+export function inheritGongfaProgress(
+  source: GongfaItemDefinition | null | undefined,
+  target: GongfaItemDefinition,
+): { mastery: number; masteryExp: number } | null {
+  if (!source) return null;
+  const ratio = gongfaProgressRatio(source);
+  if (ratio <= 0) return null;
+  const m = gongfaMaxLayerOf(target);
+  if (m <= 1) return { mastery: 1, masteryExp: 0 };
+  const pos = ratio * (m - 1);          // 连续层位置（0 ~ m-1）
+  // 保留最后一层：续篇入手即满级会抹掉成长空间。
+  const layer = Math.min(m - 1, Math.max(1, Math.floor(pos) + 1));
+  const th = getGongfaMasteryThreshold(layer, m);
+  const frac = pos - Math.floor(pos);   // 当前层内已完成的比例
+  const exp = Number.isFinite(th) ? Math.round(th * frac) : 0;
+  return { mastery: layer, masteryExp: Math.max(0, exp) };
 }
 
 export function addGongfaMasteryExp(
   gongfa: GongfaItemDefinition,
   expIncrease: number,
+  maxLayer?: number,
 ): { leveledUp: boolean; newMastery: number } {
-  if (expIncrease <= 0) return { leveledUp: false, newMastery: gongfa.mastery ?? 1 };
+  const max = clampGongfaMastery(Number.MAX_SAFE_INTEGER, maxLayer ?? gongfaMaxLayerOf(gongfa));
+  // 老存档层数可能超过新上限，先夹取再累加。
+  let mastery = clampGongfaMastery(gongfa.mastery ?? 1, max);
+  if (expIncrease <= 0) {
+    gongfa.mastery = mastery;
+    return { leveledUp: false, newMastery: mastery };
+  }
 
-  let mastery = gongfa.mastery ?? 1;
   let exp = gongfa.masteryExp ?? 0;
 
-  if (mastery >= 10) {
-    gongfa.masteryExp = exp;
-    return { leveledUp: false, newMastery: 10 };
+  if (mastery >= max) {
+    gongfa.mastery = max;
+    gongfa.masteryExp = 0;
+    return { leveledUp: false, newMastery: max };
   }
 
   exp += expIncrease;
   let leveledUp = false;
 
-  while (mastery < 10) {
-    const threshold = getGongfaMasteryThreshold(mastery);
-    if (exp < threshold) break;
+  while (mastery < max) {
+    const threshold = getGongfaMasteryThreshold(mastery, max);
+    if (!Number.isFinite(threshold) || exp < threshold) break;
     exp -= threshold;
     mastery++;
     leveledUp = true;
   }
 
-  if (mastery >= 10) {
-    mastery = 10;
+  if (mastery >= max) {
+    mastery = max;
     exp = 0;
   }
 
@@ -236,18 +343,22 @@ export function addGongfaMasteryExp(
  * 用于 NPC 新建/重评估时，按境界修为总量均分给各功法，推算合理的功法层数，
  * 使 NPC 功法强度与其境界匹配（而非一律 1 层）。
  */
-export function computeGongfaMasteryFromBudget(budget: number): { mastery: number; masteryExp: number } {
+export function computeGongfaMasteryFromBudget(
+  budget: number,
+  maxLayer = 10,
+): { mastery: number; masteryExp: number } {
   if (!Number.isFinite(budget) || budget <= 0) return { mastery: 1, masteryExp: 0 };
+  const max = Math.max(1, Math.floor(maxLayer));
   let mastery = 1;
   let exp = Math.floor(budget);
-  while (mastery < 10) {
-    const threshold = getGongfaMasteryThreshold(mastery);
-    if (exp < threshold) break;
+  while (mastery < max) {
+    const threshold = getGongfaMasteryThreshold(mastery, max);
+    if (!Number.isFinite(threshold) || exp < threshold) break;
     exp -= threshold;
     mastery++;
   }
-  if (mastery >= 10) {
-    mastery = 10;
+  if (mastery >= max) {
+    mastery = max;
     exp = 0;
   }
   return { mastery, masteryExp: Math.max(0, exp) };
@@ -272,7 +383,7 @@ export function applyNpcGongfaMasteryByRealm(
   if (gongfas.length === 0) return;
   const perGongfa = totalBudget / gongfas.length;
   for (const gf of gongfas) {
-    const { mastery, masteryExp } = computeGongfaMasteryFromBudget(perGongfa);
+    const { mastery, masteryExp } = computeGongfaMasteryFromBudget(perGongfa, gongfaMaxLayerOf(gf));
     gf.mastery = mastery;
     gf.masteryExp = masteryExp;
   }

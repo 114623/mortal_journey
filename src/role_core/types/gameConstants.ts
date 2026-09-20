@@ -345,12 +345,12 @@ export const GONGFA_MP_COST_BY_GRADE = [15, 30, 60, 120, 250, 500] as const;
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const GONGFA_GRADE_CULTIVATION_MULT: Readonly<Record<string, number>> = {
-  下品: 1.0,
-  中品: 1.05,
-  上品: 1.10,
-  极品: 1.15,
-  仙品: 1.2,
-  神品: 1.25,
+  下品: 1.25,
+  中品: 1.15,
+  上品: 1.05,
+  极品: 0.95,
+  仙品: 0.85,
+  神品: 0.7,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -367,22 +367,100 @@ export const LINGGEN_CULTIVATION_MULT: Readonly<Record<number, number>> = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 14. 功法熟练度阈值（每层升级所需熟练度经验，索引0=第1→2层，...索引8=第9→10层）
+// 14. 功法修炼进度阈值（从第 N 层升到第 N+1 层所需经验）
+//
+//     基准曲线为 10 层功法的 9 段阈值（合计 263,500）。
+//     功法层数上限由阶层决定（凡人3层 ~ 化神10层，见
+//     `itemTier.GONGFA_MAX_LAYER_BY_TIER`），阈值按上限层数**等比重采样**：
+//     段数变少时总额按段数等比缩放（每层平均成本不变），形状保持"前松后紧"。
+//     取用走 {@link getGongfaMasteryThreshold}（realmUtils），勿直接索引本表。
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const GONGFA_MASTERY_THRESHOLDS = [
   500, 1000, 2000, 5000, 10000, 25000, 50000, 70000, 100000,
 ] as const;
 
+/** 基准阈值总额（10 层功法的完整爬坡预算）。 */
+export const GONGFA_MASTERY_BUDGET_10 = 263_500;
+
+/** 单段阈值的最小值，避免重采样后出现过小的段（如 100 层时退化为 0）。 */
+const MASTERY_THRESHOLD_MIN = 100;
+
+const thresholdCache = new Map<number, readonly number[]>();
+
+/** 基准曲线的**累计**占比（长度 10，首尾为 0 与 1），用于按进度比例切分段。 */
+const BASE_CUMULATIVE: readonly number[] = (() => {
+  const out: number[] = [0];
+  let acc = 0;
+  for (const v of GONGFA_MASTERY_THRESHOLDS) {
+    acc += v;
+    out.push(acc / GONGFA_MASTERY_BUDGET_10);
+  }
+  return out;
+})();
+
+/** 在累计曲线上按连续索引取样（索引范围 0 ~ 9）。 */
+function sampleCumulative(idx: number): number {
+  const n = BASE_CUMULATIVE.length;
+  const pos = Math.max(0, Math.min(idx, n - 1));
+  const i0 = Math.floor(pos);
+  const i1 = Math.min(n - 1, i0 + 1);
+  const f = pos - i0;
+  return BASE_CUMULATIVE[i0] + (BASE_CUMULATIVE[i1] - BASE_CUMULATIVE[i0]) * f;
+}
+
+/**
+ * 按功法的**层数上限**生成阈值表：共 `maxLayer - 1` 段（上限 10 层时即基准表本身）。
+ *
+ * 做法是在基准曲线的**累计占比**上等距切分——这样 10 层档与旧表逐项一致，
+ * 段数变少时形状也不会退化成「第一段极廉、末段极贵」的悬崖。
+ * 总额按段数等比缩放（每层平均成本不变）。
+ *
+ * @param maxLayer 功法层数上限（≥2）；≤1 视为无可升级段，返回空表。
+ */
+export function buildGongfaMasteryThresholds(maxLayer: number): readonly number[] {
+  const segs = Math.max(0, Math.floor(maxLayer) - 1);
+  if (segs <= 0) return [];
+  const cached = thresholdCache.get(segs);
+  if (cached) return cached;
+  const baseSegs = GONGFA_MASTERY_THRESHOLDS.length;
+  const total = GONGFA_MASTERY_BUDGET_10 * segs / baseSegs;
+  const out: number[] = [];
+  let prev = 0;
+  for (let k = 1; k <= segs; k++) {
+    const cur = sampleCumulative(k * baseSegs / segs);
+    const v = (cur - prev) * total;
+    prev = cur;
+    out.push(Math.max(MASTERY_THRESHOLD_MIN, Math.round(v / 100) * 100));
+  }
+  thresholdCache.set(segs, out);
+  return out;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
-// 15. 功法熟练度倍率表（索引0=第1层，索引9=第10层）
+// 15. 功法修炼进度倍率
+//
+//     旧版是两张写死的 10 项查表（属性 1→10×、战斗 1→2.35×），与层数上限耦合。
+//     现改为**按进度比例插值**：满层时达到该阶层的封顶倍率，
+//     属性上限按阶层分档（见 `itemTier.GONGFA_ATTRI_CAP_BY_TIER`），
+//     战斗上限恒为 {@link GONGFA_COMBAT_MULT_CAP}（战斗曲线本就平缓，不随阶层放大）。
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** 功法满层时的战斗效果倍率上限（与旧版第 10 层一致）。 */
+export const GONGFA_COMBAT_MULT_CAP = 2.35;
+
+/**
+ * @deprecated 保留仅为兼容外部引用；实际取倍率请用
+ * {@link gongfaAttriMult} / {@link gongfaCombatMult}（realmUtils）。
+ */
 export const GONGFA_MASTERY_ATTRI_MULT = [
   1.0, 2.0, 3.0, 4.0, 5.0,
   6.0, 7.0, 8.0, 9.0, 10.0,
 ] as const;
 
+/**
+ * @deprecated 同上。
+ */
 export const GONGFA_MASTERY_COMBAT_MULT = [
   1.0, 1.15, 1.30, 1.45, 1.60,
   1.75, 1.90, 2.05, 2.20, 2.35,

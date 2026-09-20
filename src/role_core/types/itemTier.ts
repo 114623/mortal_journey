@@ -8,10 +8,9 @@
  * 设计目标：防止「练气期捡到一件强力法宝，一路用到元婴期仍不过时」。
  * 实现方式是双层闭环：
  *   ① 生成时：数值 = 基础值 × TIER_MULT[tier]（高阶层物品的初始数值本来就更高）
- *   ② 使用时：跨境界威能衰减（2026-09 起分品类——
- *      法宝走 {@link treasureTierFactor}：低阶不削弱，仅器灵封印 + 凡人阶衰减；
- *      功法走 {@link gongfaTierFactor} → tierFactor：仍按 0.65^Δ 衰减，
- *      且境界高出后「已不入流」不再产修为，见 {@link isGongfaObsolete}）
+ *   ② 使用时：跨境界威能衰减（法宝走 {@link treasureTierFactor}、功法走
+ *      {@link gongfaTierFactor} → tierFactor，同为 0.65^Δ 低阶衰减；
+ *      功法另有境界高出后「已不入流」不再产修为，见 {@link isGongfaObsolete}）
  *
  * 丹药有独立系数（见 `elixirTierFactor`），材料待扩展。
  *
@@ -19,7 +18,18 @@
  * 见 {@link isGongfaObsolete}。
  */
 
-import { REALM_ORDER, type RealmMajor } from "./playInfo";
+/* 只取类型，不取运行时值。
+ *
+ * 曾经这里写的是 `import { REALM_ORDER, type RealmMajor } from "./playInfo"`，
+ * 于是形成了一条环：playInfo（再导出 realmUtils）→ realmUtils → itemTier → playInfo。
+ * 环本身早就存在，但 realmUtils 原先只 *值引用* 无关模块时不致命；
+ * 直到 realmUtils 开始引入 gongfaMaxLayer 后，加载顺序变成
+ * playInfo 初始化中途去初始化 itemTier，而 itemTier 在顶层立刻读 REALM_ORDER，
+ * 撞上暂时性死区（Cannot access 'REALM_ORDER' before initialization），整个 App 白屏。
+ *
+ * 正确方向是：itemTier 是被 Character / Npc / Protagonist / gameSave 等广泛引用的
+ * 叶子模块，绝不能反向依赖 playInfo 这个枢纽。故此处改为本地常量 + 纯类型引用。 */
+import type { RealmMajor } from "./playInfo";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 类型与顺序
@@ -28,8 +38,14 @@ import { REALM_ORDER, type RealmMajor } from "./playInfo";
 /** 物品阶层，直接复用修炼体系的大境界名。 */
 export type ItemTier = RealmMajor;
 
-/** 阶层由低到高，索引即 `tierIndex()`。 */
-export const TIER_ORDER: readonly ItemTier[] = REALM_ORDER as readonly ItemTier[];
+/** 阶层由低到高，索引即 `tierIndex()`。必须与 playInfo 的 REALM_ORDER 完全一致。 */
+export const TIER_ORDER = ["凡人", "练气", "筑基", "结丹", "元婴", "化神"] as const;
+
+/* 编译期卫兵：一旦 REALM_ORDER 增删而此处没跟上，这一行会直接类型报错，
+   避免两份境界列表悄悄走偏。（RealmMajor 是纯类型引用，不产生运行时依赖。） */
+type _TierCoversAllRealms =
+  Exclude<RealmMajor, (typeof TIER_ORDER)[number]> extends never ? true : never;
+export const _tierCoversAllRealms: _TierCoversAllRealms = true;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ① 生成时 — 阶层数值倍率
@@ -157,8 +173,7 @@ export function rollItemTier(realmMajor: string | null | undefined): ItemTier {
  * - 物品高于使用者：0.35 ^ Δ（器灵封印）
  * - **凡人阶物品**走 {@link mortalTierFactor}：高 1 阶仅剩 10%，高 2 阶起完全失效。
  *
- * 注意：法宝已改用 {@link treasureTierFactor}（低阶不削弱，2026-09 玩家决策）；
- * 本函数目前实际作用于功法属性加成（经 {@link gongfaTierFactor}）。
+ * 法宝与功法共用本曲线（法宝经 {@link treasureTierFactor}，曲线相同）。
  *
  * @param itemTier 物品阶层。
  * @param userRealmMajor 使用者当前大境界。
@@ -182,9 +197,9 @@ export function tierFactor(
 /**
  * 法宝专用的跨阶压制系数（0 ~ 1）。
  *
- * 与通用 {@link tierFactor} 的区别（2026-09 玩家决策）：**物品阶层低于使用者境界时
- * 不再削弱**——低阶法宝照常发挥全部词条威能，只用「不入流」逻辑逼换装的是功法，
- * 法宝不设此门槛。保留的衰减只有两条：
+ * 2026-09-19 复原：取消「低阶法宝不削弱」的特殊规则，曲线与 {@link tierFactor}
+ * 完全一致的双向压制——
+ * - 物品低于使用者：0.65 ^ Δ（练气法宝被元婴修士使用 → 0.65³ ≈ 27%）
  * - 物品高于使用者：0.35 ^ Δ（器灵封印，防越阶捡宝直接毕业）
  * - 凡人阶物品：{@link mortalTierFactor}（高 1 阶剩 10%，高 2 阶起完全失效）
  */
@@ -200,9 +215,8 @@ export function treasureTierFactor(
   if (delta === 0) return 1;
   // 凡俗之物不入修行：保留更陡的凡人阶专属衰减，且允许归零。
   if (itemTier === "凡人" && delta > 0) return mortalTierFactor(delta);
-  // 低阶法宝不削弱：境界压制不再作为法宝的淘汰机制。
-  if (delta > 0) return 1;
-  return Math.max(TIER_SUPP_FLOOR, Math.pow(TIER_SUPP_HIGH, -delta));
+  const base = delta > 0 ? TIER_SUPP_LOW : TIER_SUPP_HIGH;
+  return Math.max(TIER_SUPP_FLOOR, Math.pow(base, Math.abs(delta)));
 }
 
 /**
@@ -306,6 +320,60 @@ export function describeElixirTierSuppression(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 功法专项 — 层数上限（按阶层）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * 功法的**层数上限**（按阶层）。
+ *
+ * 阶层越低的功法可修炼的层数越少——「练气功法练到头也就五层」，
+ * 于是换功法的动机从「境界超过就归零」变成自然的边际收束。
+ *
+ * 未指定阶层的功法（老存档）按 {@link DEFAULT_GONGFA_MAX_LAYER} 处理。
+ */
+export const GONGFA_MAX_LAYER_BY_TIER: Readonly<Record<ItemTier, number>> = {
+  凡人: 3,
+  练气: 5,
+  筑基: 6,
+  结丹: 7,
+  元婴: 8,
+  化神: 10,
+};
+
+/** 未指定阶层时的功法层数上限（= 旧版固定值，老存档兼容）。 */
+export const DEFAULT_GONGFA_MAX_LAYER = 10;
+
+/**
+ * 功法**满层时的主属性加成倍率上限**（按阶层）。
+ *
+ * 旧版是「所有功法满层一律 10×」，导致练气功法练满也有化神级的面板贡献。
+ * 现在按阶层封顶，低阶功法的属性天花板明显更低。
+ */
+export const GONGFA_ATTRI_CAP_BY_TIER: Readonly<Record<ItemTier, number>> = {
+  凡人: 2.5,
+  练气: 4,
+  筑基: 5.5,
+  结丹: 7,
+  元婴: 8.5,
+  化神: 10,
+};
+
+/** 未指定阶层时的属性倍率上限（= 旧版满层值，老存档兼容）。 */
+export const DEFAULT_GONGFA_ATTRI_CAP = 10;
+
+/** 取功法的层数上限；阶层缺失或非法时回退 {@link DEFAULT_GONGFA_MAX_LAYER}。 */
+export function gongfaMaxLayer(tier: string | null | undefined): number {
+  if (!tier) return DEFAULT_GONGFA_MAX_LAYER;
+  return GONGFA_MAX_LAYER_BY_TIER[tier as ItemTier] ?? DEFAULT_GONGFA_MAX_LAYER;
+}
+
+/** 取功法满层时的属性倍率上限；阶层缺失或非法时回退 {@link DEFAULT_GONGFA_ATTRI_CAP}。 */
+export function gongfaAttriCap(tier: string | null | undefined): number {
+  if (!tier) return DEFAULT_GONGFA_ATTRI_CAP;
+  return GONGFA_ATTRI_CAP_BY_TIER[tier as ItemTier] ?? DEFAULT_GONGFA_ATTRI_CAP;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 旧存档兼容
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -347,9 +415,10 @@ export function tierLabel(tier: string | null | undefined): string {
 /**
  * 生成法宝阶层的 UI 提示文案（含跨阶压制说明）。
  *
- * 规则与 {@link treasureTierFactor} 一致：低阶不削弱，仅凡人阶衰减与器灵封印。
+ * 规则与 {@link treasureTierFactor} 一致：双向压制（低阶 0.65^Δ / 高阶器灵封印 /
+ * 凡人阶专属衰减）。
  *
- * @returns 同阶 / 低阶时返回 `「练气阶 · 威能全开」`；否则返回压制百分比与原因。
+ * @returns 同阶时返回 `「练气阶 · 威能全开」`；否则返回压制百分比与原因。
  */
 export function describeTierSuppression(
   itemTier: string | null | undefined,
@@ -359,11 +428,16 @@ export function describeTierSuppression(
   const f = treasureTierFactor(itemTier, userRealmMajor);
   const pct = Math.round(f * 100);
   if (f >= 1) return `${tierLabel(itemTier)} · 威能全开`;
-  if (f <= 0) return `${tierLabel(itemTier)} · 完全失效（凡俗之物不入修行）`;
+  if (f <= 0) return `${tierLabel(itemTier)} · 凡俗之物（完全失效）`;
   if (itemTier === "凡人") {
-    return `${tierLabel(itemTier)} · 威能 ${pct}%（凡俗之物，仅低阶修士可用）`;
+    return `${tierLabel(itemTier)} · 威能 ${pct}%（凡俗之物）`;
   }
-  return `${tierLabel(itemTier)} · 威能 ${pct}%（器灵封印，需${itemTier}之境）`;
+  const userIdx = (TIER_ORDER as readonly string[]).indexOf(userRealmMajor ?? "");
+  const itemIdx = (TIER_ORDER as readonly string[]).indexOf(itemTier);
+  if (userIdx >= 0 && itemIdx >= 0 && itemIdx < userIdx) {
+    return `${tierLabel(itemTier)} · 威能 ${pct}%（跨阶压制，法宝已跟不上当前境界）`;
+  }
+  return `${tierLabel(itemTier)} · 威能 ${pct}%（当前境界无法发挥法宝实力）`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -378,11 +452,113 @@ export function describeTierSuppression(
  * 回退（下品→练气），一个元婴期老角色的入门功法会立刻被压到两三成，
  * 属于无预警的削号。故缺 tier 一律视为「不受压制」（返回 undefined）。
  * 玩家可在「天道编辑」里给功法显式指定阶层，指定后即参与压制。
+ *
+ * 注：**运行时缺 tier 已属异常**。正常流程下功法一入袋/一装备就会被
+ * {@link ensureGongfaTier} 就地补阶层；老存档则由 {@link backfillGongfaTiers}
+ * 在读档时补齐。保留此处的宽松语义纯粹作为防御，避免漏网数据被误削。
  */
 export function resolveGongfaTier(
   tier: string | null | undefined,
 ): ItemTier | undefined {
   return isItemTier(tier) ? tier : undefined;
+}
+
+/**
+ * 老存档迁移：把超过**新层数上限**的修炼层数夹回上限。
+ *
+ * 层数上限改为按阶层决定（凡人3 ~ 化神10）后，一个练气阶功法若存着旧的
+ * `mastery: 10` 就会越界（显示为「第10/5层」）。读档时夹一次即可：
+ * 夹到满层时清空层内经验（与满层语义一致）。
+ *
+ * 只操作纯 JSON 存档数据，不依赖类实例，须在 `loadFromJson` / `restoreNpcs` 之前调用。
+ *
+ * @returns 被夹取的功法条数。
+ */
+export function clampGongfaMasteryInHolder(
+  holder: {
+    realm?: { major?: string | null } | null;
+    gongfaSlots?: unknown;
+    inventorySlots?: unknown;
+  } | null | undefined,
+): number {
+  if (!holder || typeof holder !== "object") return 0;
+  let count = 0;
+  const visit = (rec: Record<string, unknown>): void => {
+    if (rec.itemType !== "功法") return;
+    const max = gongfaMaxLayer(rec.tier as string | null | undefined);
+    const raw = typeof rec.mastery === "number" && Number.isFinite(rec.mastery) ? rec.mastery : 1;
+    if (raw <= max) return;
+    rec.mastery = max;
+    rec.masteryExp = 0;
+    count++;
+  };
+  if (Array.isArray(holder.gongfaSlots)) {
+    for (const g of holder.gongfaSlots) {
+      if (g && typeof g === "object") visit(g as Record<string, unknown>);
+    }
+  }
+  if (Array.isArray(holder.inventorySlots)) {
+    for (const it of holder.inventorySlots) {
+      if (it && typeof it === "object") visit(it as Record<string, unknown>);
+    }
+  }
+  return count;
+}
+
+/**
+ * 功法缺 `tier` 时的兜底阶层：**与持有者同阶**（持有者境界非法时按练气）。
+ *
+ * 语义与老存档迁移 {@link backfillGongfaTiers} 完全一致：补完后压制系数为 1、
+ * 也不算「不入流」，即**补写瞬间数值不变**；此后主角突破，该功法就按正常规则
+ * 开始衰减乃至不入流——这正是兜底的目的，而不是让它永久免疫压制。
+ */
+export function fallbackGongfaTier(
+  realmMajor: string | null | undefined,
+): ItemTier {
+  return isItemTier(realmMajor) ? (realmMajor as ItemTier) : "练气";
+}
+
+/**
+ * 就地补齐一条功法记录的阶层（缺则写回，已有则不动）。
+ *
+ * 这是「AI / 命运抉择 / 天道编辑 漏填 tier」的**统一兜底点**：在功法进入
+ * 角色的那一刻按持有者当前境界固化阶层，之后所有下游（跨阶压制、修为门槛、
+ * 面板展示、战斗注入）都拿到确定的 tier，不会再有「无阶层 = 永久免疫压制」
+ * 的漏子。
+ *
+ * 只认 `itemType === "功法"` 的记录，其余物品一律不动。
+ *
+ * @returns 是否发生了补写（便于调用方统计/记日志）。
+ */
+export function ensureGongfaTier(
+  item: unknown,
+  realmMajor: string | null | undefined,
+): boolean {
+  if (!item || typeof item !== "object") return false;
+  const rec = item as Record<string, unknown>;
+  if (rec.itemType !== "功法") return false;
+  if (isItemTier(rec.tier)) return false;
+  rec.tier = fallbackGongfaTier(realmMajor);
+  return true;
+}
+
+/**
+ * 批量版 {@link ensureGongfaTier}：就地补齐一整条功法栏（跳过空槽）。
+ *
+ * 用于「整体赋值 gongfaSlots」的路径——它们绕过了 `setGongfaSlot` 收口点。
+ *
+ * @returns 补写的条数。
+ */
+export function ensureGongfaTierList(
+  slots: readonly unknown[] | null | undefined,
+  realmMajor: string | null | undefined,
+): number {
+  if (!Array.isArray(slots)) return 0;
+  let count = 0;
+  for (const s of slots) {
+    if (ensureGongfaTier(s, realmMajor)) count++;
+  }
+  return count;
 }
 
 /** 功法的跨阶压制系数；未指定阶层时恒为 1。 */
@@ -454,13 +630,14 @@ export function backfillGongfaTiers(
   if (!holder || typeof holder !== "object") return 0;
   const major = holder.realm?.major;
   if (!isItemTier(major)) return 0;
+  const fallback = fallbackGongfaTier(major);
   let count = 0;
   if (Array.isArray(holder.gongfaSlots)) {
     for (const g of holder.gongfaSlots) {
       if (!g || typeof g !== "object") continue;
       const rec = g as Record<string, unknown>;
       if (!isItemTier(rec.tier)) {
-        rec.tier = major;
+        rec.tier = fallback;
         count++;
       }
     }
@@ -471,7 +648,7 @@ export function backfillGongfaTiers(
       const rec = it as Record<string, unknown>;
       if (rec.itemType !== "功法") continue;
       if (!isItemTier(rec.tier)) {
-        rec.tier = major;
+        rec.tier = fallback;
         count++;
       }
     }

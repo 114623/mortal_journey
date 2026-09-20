@@ -15,13 +15,14 @@ import {
   EQUIP_SLOT_COUNT,
   GONGFA_SLOT_COUNT,
   TABLE,
-  GONGFA_MASTERY_ATTRI_MULT,
   PROFILE_FIELD_MAX_LENGTH,
   MEMORY_MAX_LENGTH,
   normalizeProfile,
 } from "./types/playInfo";
 import {
   getRealmPrimaryStats,
+  gongfaAttriMultOf,
+  inheritGongfaProgress,
 } from "./realmUtils";
 import type { SpiritStoneName } from "./types/spiritStone";
 import {
@@ -44,10 +45,47 @@ import {
 } from "./CharacterEquip";
 import { applyLinggenElixirBoost } from "./types/elixir";
 import { applyStatConversions, applyResourceConversions, type TreasureConversion } from "./types/treasure";
-import { treasureTierFactor, resolveItemTier, gongfaTierFactor } from "./types/itemTier";
+import { treasureTierFactor, resolveItemTier, gongfaTierFactor, ensureGongfaTier } from "./types/itemTier";
 
 const HP_PER_PHYSIQUE = 10;
 const MP_PER_SPIRIT = 10;
+
+/**
+ * 【机缘·续作承继】功法入袋/装备时，若它标注了 `inheritFrom`（后续篇 / 续写 / 补全残卷），
+ * 且持有者名下确有那门旧功法，就沿用其修炼进度——按进度比例折算到本篇层数。
+ *
+ * 与 `ensureGongfaTier` 同挂在「物品进入角色」的收口点，覆盖 AI 掉落、命运抉择、
+ * 天道编辑、NPC 卡片全部来源；找不到源功法或未标注时静默跳过。
+ */
+export function applyGongfaInheritance(
+  holder: { gongfaSlots?: readonly unknown[] | null; inventorySlots?: readonly unknown[] | null },
+  item: unknown,
+): boolean {
+  if (!item || typeof item !== "object") return false;
+  const rec = item as Record<string, unknown>;
+  if (rec.itemType !== "功法") return false;
+  const srcName = typeof rec.inheritFrom === "string" ? rec.inheritFrom.trim() : "";
+  if (!srcName) return false;
+  let src: unknown = null;
+  for (const arr of [holder.gongfaSlots, holder.inventorySlots]) {
+    if (!Array.isArray(arr)) continue;
+    for (const g of arr) {
+      if (!g || typeof g !== "object") continue;
+      const gr = g as Record<string, unknown>;
+      if (gr.itemType === "功法" && gr.name === srcName && g !== item) {
+        src = g;
+        break;
+      }
+    }
+    if (src) break;
+  }
+  if (!src) return false;
+  const got = inheritGongfaProgress(src as never, item as never);
+  if (!got) return false;
+  rec.mastery = got.mastery;
+  rec.masteryExp = got.masteryExp;
+  return true;
+}
 
 /**
  * 规范化丹药/天赋加成映射：仅保留有限且非零的数值项。
@@ -165,7 +203,8 @@ export class Character {
     for (const gf of this.gongfaSlots) {
       if (!gf) continue;
       const mastery = gf.mastery ?? 1;
-      const masteryMult = GONGFA_MASTERY_ATTRI_MULT[Math.min(mastery, GONGFA_MASTERY_ATTRI_MULT.length) - 1];
+      // 倍率按「修炼进度比例」在 [1, 阶层封顶] 之间插值——层数上限由阶层决定。
+      const masteryMult = gongfaAttriMultOf(gf);
       // 功法阶层压制：低阶功法被高阶修士修习时加成衰减（凡人武功在练气期只剩一成）。
       const tierF = gongfaTierFactor(gf.tier, this.realm.major);
       const adjusted: Record<string, number> = {};
@@ -191,7 +230,7 @@ export class Character {
   /**
    * 汇总当前已装备法宝的特殊效果转换项。
    *
-   * 转换比率会先按 {@link treasureTierFactor} 做跨阶压制（低阶法宝不削弱，
+   * 转换比率会先按 {@link treasureTierFactor} 做跨阶压制（低阶法宝按 0.65^Δ 削弱，
    * 高阶法宝被低阶修士使用时受器灵封印；凡人阶走专属衰减），再返回。
    * 由于主属性与 HP/MP 上限都读这里的结果，两处压制自然保持一致。
    *
@@ -363,12 +402,20 @@ export class Character {
   // ===================================================================
 
   setInventorySlot(index: number, item: InventoryStackItem | null): boolean {
-    if (item) applyLinggenElixirBoost(item, this.linggen, this.realm.major);
+    if (item) {
+      applyLinggenElixirBoost(item, this.linggen, this.realm.major);
+      // 阶层兜底：AI / 天道编辑 / 命运抉择漏填 tier 的功法，入袋时按当前境界固化。
+      ensureGongfaTier(item, this.realm.major);
+      applyGongfaInheritance(this, item);
+    }
     return invSetSlot(this, index, item);
   }
 
   addToInventory(item: InventoryStackItem): number {
     applyLinggenElixirBoost(item, this.linggen, this.realm.major);
+    // 同上：所有「物品进入角色」的路径都收口到这里，功法阶层在此一次补齐。
+    ensureGongfaTier(item, this.realm.major);
+    applyGongfaInheritance(this, item);
     return invAdd(this, item);
   }
 
@@ -389,6 +436,11 @@ export class Character {
   // ===================================================================
 
   setGongfaSlot(index: number, item: import("./types/itemInfo").GongfaItemDefinition | null): boolean {
+    // 直接装备（不经储物袋）的功法同样补阶层，例如天道编辑、NPC 卡片写入。
+    if (item) {
+      ensureGongfaTier(item, this.realm.major);
+      applyGongfaInheritance(this, item);
+    }
     return eqSetGongfa(this, index, item);
   }
 

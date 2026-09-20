@@ -1,4 +1,5 @@
 import { composeStateSystemPreset } from "./state_preset";
+import { formatMainline } from "./story_preset";
 import { getWorldPreset } from "../role_core/worldSettingsStore";
 import { extractTagContent, tryParseJsonArray } from "./parseAiItem";
 import {
@@ -18,14 +19,19 @@ import {
   type NpcRace,
 } from "../role_core/types/playInfo";
 import { type WorldTime, type TimeDelta, formatWorldTimeZhDisplay } from "../role_core/worldTime";
-import { describeNextBreakthrough } from "../role_core/realmUtils";
+import { describeNextBreakthrough, gongfaMaxLayerOf } from "../role_core/realmUtils";
 import { formatWorldLocationDash, parseWorldLocationFromDash } from "../role_core/types/worldLocation";
+import type { SceneReport } from "../role_core/sceneBudgetStore";
+import type { FactionChange } from "../role_core/factionStore";
+import { factionStore } from "../role_core/factionStore";
+import { buildChapterDirective } from "../role_core/chapterStore";
 import type { NpcCoreChangeEvent } from "../role_core/npcCoreChange";
 import {
   checkNpcConsistency,
   type NpcConsistencyResult,
 } from "./npcConsistency";
 import { resolveGongfaTier, isGongfaObsolete } from "../role_core/types/itemTier";
+import { genderLine, genderRule } from "./genderGuard";
 
 export interface StateGenerateInput {
   apiUrl: string;
@@ -40,6 +46,18 @@ export interface StateGenerateInput {
   currentWorldLocation?: WorldLocation | null;
   currentWorldTime?: WorldTime;
   npcSnapshot?: string;
+  /**
+   * 最近 3 轮已出现的推进轴（扁平列表，仅用于轮换提示）。
+   * 见 state_preset「推进选项生成协议 · 跨回合轮换」。
+   */
+  recentBranchAxes?: string[];
+  /**
+   * 上一轮给出的推进选项正文（无论玩家是否选用）。
+   * 用于"防复读"：本轮选项不得与上轮的核心对象大面积重复——玩家没选的就是拒绝了。
+   */
+  recentOptionTexts?: string[];
+  /** 场景配额硬约束（秘境层数 / 擂台轮次 / 连续战斗波次触顶时注入）。 */
+  sceneDirective?: string;
 }
 
 export interface HpMpState {
@@ -140,13 +158,32 @@ export interface BattleTriggerEntry {
   lethality?: BattleLethality;
 }
 
-/** 四个倾向的玩家行动建议（由状态 AI 顺便输出，供快捷选择）。 */
-export interface ActionSuggestions {
-  aggressive: string;
-  moderate: string;
-  cautious: string;
-  veryCautious: string;
+/**
+ * 单条「推进选项」——对齐《Mortal 推进选项生成协议》。
+ *
+ * 元信息（类型 / 距离 / 主动方 / 推进轴）由 AI 一并输出。前端只展示正文；
+ * 元信息用于生成端的多样性约束（距离分档防"集体扑同一个悬念"）与跨回合轮换。
+ * `hook` / `intensity` 为旧协议字段，保留成可选以兼容旧存档与模型偶发的旧格式输出。
+ */
+export interface BranchOption {
+  /** 类型：当下行动 / 叙事推力 / 更具体类型。 */
+  type: string;
+  /** 距离：贴身 / 邻近 / 旁支 / 远离 —— 选项与正文尾部的贴近程度。 */
+  distance: string;
+  /** 推进轴：浪漫/艳遇、危机/压力、机缘/异常 等。 */
+  axis: string;
+  /** 主动方：B1 / NPC 名 / 势力 / 世界。 */
+  actor: string;
+  /** 玩家可见的选项正文。 */
+  text: string;
+  /** @deprecated 旧协议字段（承接：钩子/另起），仅读档兼容。 */
+  hook?: string;
+  /** @deprecated 旧协议字段（强度：稳/中/强），仅读档兼容。 */
+  intensity?: string;
 }
+
+/** 本回合的推进选项列表（1~10 条，默认 4 条）。 */
+export type ActionSuggestions = BranchOption[];
 
 export interface StateParsed {
   worldLocation: WorldLocation | null;
@@ -159,9 +196,13 @@ export interface StateParsed {
   itemRemoves: ItemRemoveEntry[];
   nearbyNpcs: NpcNearbyEntry[];
   npcCoreChanges: NpcCoreChangeEvent[];
+  /** 本回合 AI 声明的势力变更事件（add / update）。 */
+  factionChanges: FactionChange[];
   battleTrigger: BattleTriggerEntry | null;
   storySnapshot: string;
   actionOptions: ActionSuggestions | null;
+  /** 本回合 AI 报告的场景进度（秘境层 / 擂台轮）；null = 未报告。 */
+  sceneReport: SceneReport | null;
   /** NPC 与剧情正文的一致性校验结果（未传 storyBody 时为 null）。 */
   npcConsistency: NpcConsistencyResult | null;
 }
@@ -183,12 +224,16 @@ const TAG_NPC_NEARBY_OPEN = "<NPC_NEARBY_TAG>";
 const TAG_NPC_NEARBY_CLOSE = "</NPC_NEARBY_TAG>";
 const TAG_NPC_CORE_CHANGE_OPEN = "<MJ_NPC_CORE_CHANGE_TAG>";
 const TAG_NPC_CORE_CHANGE_CLOSE = "</MJ_NPC_CORE_CHANGE_TAG>";
+const TAG_FACTION_OPEN = "<MJ_FACTION_TAG>";
+const TAG_FACTION_CLOSE = "</MJ_FACTION_TAG>";
 const TAG_BATTLE_TRIGGER_OPEN = "<BATTLE_TRIGGER_TAG>";
 const TAG_BATTLE_TRIGGER_CLOSE = "</BATTLE_TRIGGER_TAG>";
 const TAG_STORY_SNAPSHOT_OPEN = "<mj_story_snapshot>";
 const TAG_STORY_SNAPSHOT_CLOSE = "</mj_story_snapshot>";
 const TAG_ACTION_OPTIONS_OPEN = "<MJ_ACTION_OPTIONS_TAG>";
 const TAG_ACTION_OPTIONS_CLOSE = "</MJ_ACTION_OPTIONS_TAG>";
+const TAG_SCENE_OPEN = "<MJ_SCENE_TAG>";
+const TAG_SCENE_CLOSE = "</MJ_SCENE_TAG>";
 const TAG_HP_MP_OPEN = "<MJ_HP_MP_TAG>";
 const TAG_HP_MP_CLOSE = "</MJ_HP_MP_TAG>";
 const TAG_TIME_OPEN = "<MJ_TIME_TAG>";
@@ -393,6 +438,43 @@ function parseNpcCoreChanges(raw: string): NpcCoreChangeEvent[] {
   return out;
 }
 
+/**
+ * 解析 `<MJ_FACTION_TAG>` —— AI 声明的势力变更事件（add / update）。
+ *
+ * 与 NPC 核心变更同属「变更事件式」标签：绝大多数回合为空数组。
+ * 逐元素跳过脏数据，不抛异常；`op` 非 add/update 一律丢弃。
+ */
+function parseFactionChanges(raw: string): FactionChange[] {
+  const text = extractTagContent(raw, TAG_FACTION_OPEN, TAG_FACTION_CLOSE);
+  if (!text.trim()) return [];
+  const arr = tryParseJsonArray(text) ?? [];
+  const out: FactionChange[] = [];
+  for (const e of arr) {
+    if (!e || typeof e !== "object") continue;
+    const o = e as Record<string, unknown>;
+    const name = typeof o.name === "string" ? o.name.trim() : "";
+    if (!name) continue;
+    const op = o.op === "update" ? "update" : o.op === "add" ? "add" : null;
+    if (!op) continue;
+    const entry: FactionChange = { op, name };
+    if (typeof o.type === "string" && o.type.trim()) entry.type = o.type.trim();
+    if (typeof o.locationText === "string") entry.locationText = o.locationText.trim();
+    if (typeof o.demands === "string") entry.demands = o.demands.trim();
+    if (typeof o.relation === "string") entry.relation = o.relation.trim();
+    if (typeof o.desc === "string") entry.desc = o.desc.trim();
+    if (o.power && typeof o.power === "object") {
+      const p = o.power as Record<string, unknown>;
+      const power: Partial<FactionChange["power"]> = {};
+      for (const key of ["yuanying", "jiedan", "zhuji"] as const) {
+        if (typeof p[key] === "number" && Number.isFinite(p[key])) power[key] = p[key] as number;
+      }
+      if (Object.keys(power).length > 0) entry.power = power;
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
 function parseCombatantList(arr: unknown[]): BattleCombatant[] {
   return arr
     .map((e: unknown): BattleCombatant | null => {
@@ -421,29 +503,183 @@ function parseBattleTrigger(raw: string): BattleTriggerEntry | null {  const tex
   return { shouldEnterBattle: true, triggerKind, triggerReason, allies, enemies, lethality };
 }
 
+/** 协议条目：`（类型:… | 距离:… | 主动方:… | 推进轴:…）[正文]`。 */
+const BRANCH_ITEM_RE = /（([^（）]*)）\s*\[([\s\S]*?)\]/g;
+
+/** 中文键 → 字段名的映射（同时容忍旧式英文键与旧协议字段，便于兼容历史输出）。 */
+const BRANCH_KEY_MAP: Record<string, keyof BranchOption> = {
+  "类型": "type",
+  "距离": "distance",
+  "推进轴": "axis",
+  "轴": "axis",
+  "主动方": "actor",
+  // 旧协议字段：读到就归档，不再用于约束。
+  "承接": "hook",
+  "强度": "intensity",
+  "type": "type",
+  "distance": "distance",
+  "hook": "hook",
+  "axis": "axis",
+  "actor": "actor",
+  "intensity": "intensity",
+};
+
+/** 解析元信息串：`类型:当下行动 | 距离:邻近 | …`（分隔符为 |，键值分隔符为 : 或 ：）。 */
+function parseBranchMeta(meta: string): Partial<BranchOption> {
+  const out: Partial<BranchOption> = {};
+  for (const seg of meta.split("|")) {
+    const m = seg.trim().match(/^([^:：]+)[:：]\s*(.*)$/);
+    if (!m) continue;
+    const field = BRANCH_KEY_MAP[m[1].trim()];
+    if (field) out[field] = m[2].trim();
+  }
+  return out;
+}
+
+/** 补齐元信息缺省值，保证前端渲染不会拿到空标签。 */
+function finalizeBranch(item: Partial<BranchOption>): BranchOption | null {
+  const text = (item.text ?? "").trim();
+  if (!text) return null;
+  return {
+    type: item.type?.trim() || "当下行动",
+    distance: item.distance?.trim() || "邻近",
+    axis: item.axis?.trim() || "未分类",
+    actor: item.actor?.trim() || "B1",
+    text,
+    ...(item.hook ? { hook: item.hook.trim() } : {}),
+    ...(item.intensity ? { intensity: item.intensity.trim() } : {}),
+  };
+}
+
+/** 兼容旧格式：{aggressive, moderate, cautious, veryCautious} 四条纯文本。 */
+function coerceLegacyOptions(o: Record<string, unknown>): BranchOption[] {
+  const keys = ["aggressive", "moderate", "cautious", "veryCautious"] as const;
+  const legacyAxis: Record<string, string> = {
+    aggressive: "危机/压力",
+    moderate: "安顿/差事",
+    cautious: "关系试探",
+    veryCautious: "安顿/差事",
+  };
+  const out: BranchOption[] = [];
+  for (const k of keys) {
+    const v = o[k];
+    if (typeof v !== "string" || !v.trim()) continue;
+    out.push({
+      type: "当下行动",
+      distance: k === "aggressive" ? "贴身" : "邻近",
+      axis: legacyAxis[k],
+      actor: "B1",
+      text: v.trim(),
+    });
+  }
+  return out;
+}
+
 /**
- * 解析 `<MJ_ACTION_OPTIONS_TAG>` —— 状态 AI 顺便输出的四个倾向行动建议。
+ * 解析 `<MJ_ACTION_OPTIONS_TAG>` —— 状态 AI 每回合输出的推进选项。
  *
- * 容错策略：标签缺失 / 解析失败 / 任一字段缺失或为空 → 返回 null（前端隐藏按钮区）。
- * 此标签为可选输出，缺失不影响其他状态字段。
+ * 主格式是协议文本：每行一条 `（元信息）[正文]`；
+ * 同时容忍 JSON 数组与旧的四倾向对象（模型偶发偏移时不至于整轮丢弃）。
+ * 标签缺失 / 解析失败 / 无有效条目 → 返回 null（前端隐藏按钮区）。
  */
 export function parseActionOptions(raw: string): ActionSuggestions | null {
   const text = extractTagContent(raw, TAG_ACTION_OPTIONS_OPEN, TAG_ACTION_OPTIONS_CLOSE);
   if (!text.trim()) return null;
+
+  const items: BranchOption[] = [];
+  BRANCH_ITEM_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = BRANCH_ITEM_RE.exec(text)) !== null) {
+    const item = finalizeBranch({ ...parseBranchMeta(m[1]), text: m[2] });
+    if (item) items.push(item);
+    if (items.length >= 10) break;
+  }
+
+  if (items.length === 0) {
+    const obj = safeJsonParse(text);
+    if (Array.isArray(obj)) {
+      for (const e of obj) {
+        if (!e || typeof e !== "object") continue;
+        const o = e as Record<string, unknown>;
+        const item = finalizeBranch({
+          type: typeof o["类型"] === "string" ? o["类型"] : typeof o.type === "string" ? o.type : "",
+          distance: typeof o["距离"] === "string" ? o["距离"] : typeof o.distance === "string" ? o.distance : "",
+          axis: typeof o["推进轴"] === "string" ? o["推进轴"] : typeof o.axis === "string" ? o.axis : "",
+          actor: typeof o["主动方"] === "string" ? o["主动方"] : typeof o.actor === "string" ? o.actor : "",
+          text: typeof o["正文"] === "string" ? o["正文"] : typeof o.text === "string" ? o.text : "",
+        });
+        if (item) items.push(item);
+        if (items.length >= 10) break;
+      }
+    } else if (obj && typeof obj === "object") {
+      items.push(...coerceLegacyOptions(obj as Record<string, unknown>));
+    }
+  }
+
+  return items.length > 0 ? items : null;
+}
+
+/**
+ * 归一化存档里的推进选项：兼容旧存档的四倾向对象结构。
+ *
+ * 旧存档恢复时若直接当数组渲染会得到 undefined 按钮，故统一在此收口。
+ */
+export function normalizeActionSuggestions(data: unknown): ActionSuggestions | null {
+  if (!data) return null;
+  if (Array.isArray(data)) {
+    const items: BranchOption[] = [];
+    for (const e of data) {
+      if (!e || typeof e !== "object") continue;
+      const o = e as Record<string, unknown>;
+      const item = finalizeBranch({
+        type: typeof o.type === "string" ? o.type : "",
+        distance: typeof o.distance === "string" ? o.distance : "",
+        axis: typeof o.axis === "string" ? o.axis : "",
+        actor: typeof o.actor === "string" ? o.actor : "",
+        text: typeof o.text === "string" ? o.text : "",
+      });
+      if (item) items.push(item);
+    }
+    return items.length > 0 ? items : null;
+  }
+  if (typeof data === "object") return coerceLegacyOptions(data as Record<string, unknown>).length > 0
+    ? coerceLegacyOptions(data as Record<string, unknown>)
+    : null;
+  return null;
+}
+
+/**
+ * 场景进度报告（秘境层 / 擂台轮），见 state_preset「场景进度规则」。
+ *
+ * 由状态 AI 输出，程序据此维护波次配额并在触顶时注入收束指令。
+ * 类型定义收在 sceneBudgetStore（配额与进度同源），此处转出给调用方。
+ */
+export type { SceneReport } from "../role_core/sceneBudgetStore";
+
+/**
+ * 解析 `<MJ_SCENE_TAG>` —— 状态 AI 报告的场景进度。
+ *
+ * 容错：标签缺失 / 解析失败 / kind 非法 → 返回 null（不改动程序侧进度）。
+ */
+export function parseSceneReport(raw: string): SceneReport | null {
+  const text = extractTagContent(raw, TAG_SCENE_OPEN, TAG_SCENE_CLOSE);
+  if (!text.trim()) return null;
   const obj = safeJsonParse(text);
   if (!obj || typeof obj !== "object") return null;
   const o = obj as Record<string, unknown>;
-  const pickStr = (k: string): string => {
-    const v = o[k];
-    return typeof v === "string" ? v.trim() : "";
+  const rawKind = String(o.kind || "").trim();
+  const kind = rawKind === "秘境" || rawKind === "擂台" ? rawKind : "无";
+  const num = (v: unknown, dflt: number): number => {
+    const n = typeof v === "number" ? v : Number(v);
+    return Number.isFinite(n) ? Math.floor(n) : dflt;
   };
-  const aggressive = pickStr("aggressive");
-  const moderate = pickStr("moderate");
-  const cautious = pickStr("cautious");
-  const veryCautious = pickStr("veryCautious");
-  // 任一字段为空即视为残缺，整体丢弃（避免显示不完整的选项组）。
-  if (!aggressive || !moderate || !cautious || !veryCautious) return null;
-  return { aggressive, moderate, cautious, veryCautious };
+  return {
+    kind,
+    name: String(o.name || "").trim(),
+    stage: Math.max(0, num(o.stage, 0)),
+    total: Math.max(0, num(o.total, 0)),
+    ended: o.ended === true,
+  };
 }
 
 function parseHpMp(raw: string): HpMpState | null {
@@ -608,6 +844,8 @@ export function parseStateAiResponse(
   const storySnapshot = extractTagContent(raw, TAG_STORY_SNAPSHOT_OPEN, TAG_STORY_SNAPSHOT_CLOSE);
 
   const actionOptions = parseActionOptions(raw);
+  const sceneReport = parseSceneReport(raw);
+  const factionChanges = parseFactionChanges(raw);
 
   return {
     worldLocation,
@@ -620,9 +858,11 @@ export function parseStateAiResponse(
     itemRemoves,
     nearbyNpcs,
     npcCoreChanges,
+    factionChanges,
     battleTrigger,
     storySnapshot,
     actionOptions,
+    sceneReport,
     npcConsistency,
   };
 }
@@ -647,14 +887,15 @@ function formatGongfaSlots(slots: GongfaSlotsState, realmMajor?: string): string
     if (!g) continue;
     const mastery = g.mastery ?? 1;
     const exp = g.masteryExp ?? 0;
-    const expStr = mastery < 10 ? `，熟练度${exp}` : "";
+    const maxLayer = gongfaMaxLayerOf(g);
+    const expStr = mastery < maxLayer ? `，进度${exp}` : "";
     // 阶层面直接暴露给状态 AI：功法阶层低于主角境界时修炼不产修为（见 state_preset 3.5）。
     const gTier = resolveGongfaTier(g.tier);
     const tierStr = gTier ? `${gTier}阶·` : "";
     const obsoleteStr = gTier && isGongfaObsolete(gTier, realmMajor)
       ? "【已不入流·修炼不产修为】"
       : "";
-    lines.push(`功法：${g.name}（${tierStr}${g.grade}，第${mastery}层/10层${expStr}）${obsoleteStr}${g.desc ? "—" + g.desc : ""}`);
+    lines.push(`功法：${g.name}（${tierStr}${g.grade}，第${mastery}层/${maxLayer}层${expStr}）${obsoleteStr}${g.desc ? "—" + g.desc : ""}`);
   }
   return lines.length > 0 ? lines.join("\n") : "无";
 }
@@ -689,12 +930,38 @@ function buildStateUserContent(input: StateGenerateInput): string {
     ? `\n当前世界时间：${formatWorldTimeZhDisplay(input.currentWorldTime)}`
     : "";
 
+  // 推进轴轮换：把最近 3 轮用过的轴告诉 AI，避免连续多轮只在同一类轴里打转。
+  const axes = input.recentBranchAxes?.filter(a => a && a.trim()) ?? [];
+  const axesHint = axes.length > 0
+    ? `\n【推进轴轮换】最近3轮已出现的推进轴：${Array.from(new Set(axes.map(a => a.trim()))).join("、")}。本轮优先补齐其中缺失的核心轴（浪漫/艳遇、危机/压力、机缘/异常），不要连续三轮只在同类轴里打转。`
+    : "";
+
+  // 上轮选项回传：玩家没选的就是拒绝了，不要把同样的东西再端上来。
+  const prevOpts = (input.recentOptionTexts ?? [])
+    .map(t => t.trim())
+    .filter(t => t.length > 0)
+    .slice(0, 4);
+  const prevOptsHint = prevOpts.length > 0
+    ? `\n【上轮选项】上一轮给出的选项正文如下（无论玩家是否选用）：\n${prevOpts.map(t => `- ${t}`).join("\n")}\n本轮 4 条中至多 1 条与上述选项的核心对象相同；玩家未选中的方向视为已拒绝，不要重复端上来。`
+    : "";
+
+
+  // 势力档案：供状态 AI 建选项与判定势力变更时参照（与剧情 AI 注入的是同一份）。
+  const factionSnapshot = factionStore.formatFactionSnapshot();
+  const factionSection = factionSnapshot
+    ? `\n【已登记势力】\n${factionSnapshot}\n（名称与关系以此为准；仅在诉求/关系实质变化或战力曝光时才在 <MJ_FACTION_TAG> 中声明变更）\n`
+    : "";
+
+  // 篇章指令：无篇章时返回空串，不注入（零打扰）。主线作为篇章的上位方向一并带进去。
+  const chapterDirective = buildChapterDirective(getWorldPreset().storyOutline).trim();
+
   return [
     "【剧情正文】",
     input.storyBody,
     "",
     "【主角当前状态】",
     `姓名：${p.displayName}`,
+    genderLine(p.gender),
     `境界：${p.realm.major}${p.realm.minor}${p.realmComplete ? "·圆满" : ""}`,
     `修为状态：${p.realmComplete ? "修为已圆满" : "修为未圆满"}`,
     `突破状态：${p.realmComplete ? (p.breakthroughStatus === "in_quest" ? "突破任务进行中" : describeNextBreakthrough(p.realm.major, p.realm.minor)) : "修为未圆满"}`,
@@ -712,14 +979,32 @@ function buildStateUserContent(input: StateGenerateInput): string {
     "",
     "【储物袋】",
     formatInventorySlots(p.inventorySlots),
+    factionSection,
     npcSection,
+    axesHint,
+    prevOptsHint,
+    // 篇章指令：无篇章时返回空串，不注入（零打扰）。主线作为篇章的上位方向一并带进去。
+    chapterDirective ? `\n\n${chapterDirective}` : "",
+    // 场景配额硬约束：触顶时强制收束秘境/擂台，避免无限刷波。
+    input.sceneDirective?.trim() ? `\n\n${input.sceneDirective.trim()}` : "",
   ].join("\n");
 }
 
 export async function generateState(input: StateGenerateInput): Promise<StateParsed> {
+  // 世界观取玩家当前设定（可能在「世界设定」里改过），与剧情 AI 共用同一份。
+  const worldPreset = getWorldPreset();
+  const systemParts = [composeStateSystemPreset(worldPreset.worldView)];
+  // 主线（长期方向）也要喂给状态 AI：状态 AI 决定世界与 NPC 的长期演化，
+  // 只给世界观的话，「谁得势、哪条线索延续、什么机缘出现」会与玩家设定的长期方向脱节。
+  const mainline = formatMainline(worldPreset);
+  if (mainline) systemParts.push(mainline);
+  // 性别称呼硬约束：状态 AI 负责写 NPC 记忆，缺这条会把主角记成相反性别，
+  // 而 NPC 记忆又会被每一轮剧情生成读回，形成自我强化的串味循环。
+  const genderHint = genderRule(input.protagonist?.gender);
+  if (genderHint) systemParts.push(genderHint);
+
   const messages = [
-    // 世界观取玩家当前设定（可能在「世界设定」里改过），与剧情 AI 共用同一份。
-    { role: "system" as const, content: composeStateSystemPreset(getWorldPreset().worldView) },
+    { role: "system" as const, content: systemParts.join("\n\n") },
     { role: "user" as const, content: buildStateUserContent(input) },
   ];
 

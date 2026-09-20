@@ -7,7 +7,7 @@ import { applyCoreChange } from "./npcCoreChange";
 import type { WorldLocation } from "./types/worldLocation";
 import { isWorldLocationEqual } from "./types/worldLocation";
 import type { WorldTime } from "./worldTime";
-import { cloneWorldTime, createDefaultWorldTime } from "./worldTime";
+import { cloneWorldTime, createDefaultWorldTime, worldTimeToDays } from "./worldTime";
 
 const npcMap: Ref<Map<string, Npc>> = ref(new Map());
 
@@ -194,6 +194,36 @@ export function useNpcStore() {
     }
   }
 
+  // ─────────────────────────────────────────────────────────────────
+  // 最近出场排序
+  // ─────────────────────────────────────────────────────────────────
+
+  /**
+   * 「最近出场」分：越大越靠前。
+   *
+   * 以 `lastSeenWorldTime` 折算成绝对小时数（世界时间已在存档里，无需新增字段，
+   * 读档后顺序照常保留）。从未记录过出场时间的 NPC 返回 -Infinity，排在所有条目之后。
+   */
+  function lastSeenScore(npc: Npc): number {
+    const t = npc.lastSeenWorldTime;
+    if (!t) return Number.NEGATIVE_INFINITY;
+    return worldTimeToDays(t) * 24 + (t.hour ?? 0);
+  }
+
+  /** 按最近出场排序（新近在前）；时间相同则按名字，保证顺序稳定。 */
+  function sortByRecent<T extends { npc: Npc } | Npc>(list: T[]): T[] {
+    const npcOf = (x: T): Npc => ("npc" in x ? (x as { npc: Npc }).npc : (x as Npc));
+    return list.slice().sort((a, b) => {
+      const sa = lastSeenScore(npcOf(a));
+      const sb = lastSeenScore(npcOf(b));
+      // 两者都无出场时间时 -Infinity 相减为 NaN，需单独兜住。
+      if (sa === sb) return npcOf(a).displayName.localeCompare(npcOf(b).displayName, "zh-Hans-CN");
+      if (sa === Number.NEGATIVE_INFINITY) return 1;
+      if (sb === Number.NEGATIVE_INFINITY) return -1;
+      return sb - sa;
+    });
+  }
+
   function serializeNpcs(): NpcPlayInfo[] {
     const result: NpcPlayInfo[] = [];
     for (const npc of npcMap.value.values()) {
@@ -241,6 +271,8 @@ export function useNpcStore() {
     clearNpcs,
     setNpc,
     removeNpc,
+    lastSeenScore,
+    sortByRecent,
   };
 }
 

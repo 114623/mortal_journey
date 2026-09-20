@@ -95,7 +95,10 @@ finalDamage = max(MIN_DAMAGE, rawDamage - defense)   // 减法制
 
 ```
 1. 闪避判定
-   dodgeRate = getModifierTotal(target, "dodgeRate")
+   有效身法 spd = round(stats.speed × (1 + getModifierTotal(c, "speed")/100))，最低 1（与行动条同口径）
+   若被冰冻/眩晕 → 身法闪避 = 0
+   否则 身法闪避 = DODGE_AGI_MAX(35) × (spd守 − spd攻) / (spd守 + spd攻)，负值取 0
+   dodgeRate = min(DODGE_HARD_CAP(50), getModifierTotal(target, "dodgeRate") + 身法闪避)
    if random() < dodgeRate% → 闪避，伤害为 0
 
 2. 暴击判定
@@ -146,7 +149,10 @@ finalDamage = max(MIN_DAMAGE, rawDamage - defense)   // 减法制
 ### 暴击/闪避基础值
 
 - 暴击伤害基础倍率：`BASE_CRIT_DMG = 150%`
-- 闪避率来源：仅 `dodgeRate` 修正（身法不影响闪避）
+- 闪避率 = `dodgeRate` 修正 + **身法差贡献**，硬上限 `DODGE_HARD_CAP = 50%`
+  - 身法差贡献 = `DODGE_AGI_MAX(35) × (守方有效身法 − 攻方有效身法) / (两者之和)`，最低 0
+  - 比值型天然递减：守方身法高一倍约 +11.7%，跨大境界约 +11.7%~30.6%，永不免疫
+  - 被冰冻 / 眩晕时身法贡献为 0（但 dodgeRate 修正仍生效后一并参与封顶）
 
 ---
 

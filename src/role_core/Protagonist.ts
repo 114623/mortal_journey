@@ -15,7 +15,7 @@ import type {
 } from "./types/itemInfo";
 import type { TreasureSpecialEffect } from "./types/treasure";
 import { rollTreasureFunction, rollTreasureSpecialEffect } from "./types/treasure";
-import { rollItemTier, resolveItemTier, applyElixirTierSuppression, isGongfaObsolete } from "./types/itemTier";
+import { rollItemTier, resolveItemTier, applyElixirTierSuppression, isGongfaObsolete, ensureGongfaTierList } from "./types/itemTier";
 import { rollMortalMartialArt } from "./types/mortalArsenal";
 import type { GongfaSpecialEffect, GongfaSystem } from "./types/gongfa";
 import { rollGongfaFunction, normalizeGongfaSystem, normalizeGongfaRole } from "./types/gongfa";
@@ -597,6 +597,8 @@ export class Protagonist extends Character {
   applyInitState(parsed: InitStateParsed): void {
     this.equippedSlots = buildEquippedSlotsFromParsed(parsed);
     this.gongfaSlots = buildGongfaSlotsFromParsed(parsed);
+    // 开局链路是整体赋值（绕过 setGongfaSlot 收口），此处统一补阶层做二次保险。
+    ensureGongfaTierList(this.gongfaSlots, this.realm.major);
     // 开局状态在已有（天赋授予的）储物袋基础上「追加」AI 生成的物品，而非整体覆盖，
     // 以保留 fromFateChoice 写入的天赋物品（法宝/功法/丹药/材料/灵石）。
     const initInventory = buildInventoryFromParsed(parsed, this.realm.major, DEFAULT_INVENTORY_SLOT_COUNT);
@@ -719,7 +721,7 @@ export class Protagonist extends Character {
         }
         if (totalExp > 0 && validExp < totalExp) {
           gameLog.info(
-            `[修为门槛] 本回合有 ${totalExp - validExp} 点熟练度来自已不入流的功法，未折算为修为`,
+            `[修为门槛] 本回合有 ${totalExp - validExp} 点修炼进度来自已不入流的功法，未折算为修为`,
           );
         }
       }

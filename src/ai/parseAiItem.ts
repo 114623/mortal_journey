@@ -227,6 +227,8 @@ export function parseGongfaObject(
   }
   const system = normalizeGongfaSystem(obj.system);
   const role = normalizeGongfaRole(obj.role);
+  // 机缘续作：AI 标注了继承自哪门旧功法时保留该字段，程序侧据此沿用其修炼进度。
+  const inheritFrom = safeStr(obj.inheritFrom, "").trim() || undefined;
   return {
     itemType: "功法",
     name: safeStr(obj.name, "未命名功法"),
@@ -239,6 +241,7 @@ export function parseGongfaObject(
     role,
     mastery: 1,
     function: rollGongfaFunction(system, grade, role),
+    inheritFrom,
   };
 }
 

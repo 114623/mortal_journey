@@ -7,7 +7,8 @@ import type {
 } from "./types";
 import type { EffectManager } from "./EffectManager";
 import type { EventDispatcher } from "./EventDispatcher";
-import { calcDefenseReduction, checkCrit, checkDodge } from "./formulas";
+import { calcDefenseReduction, checkCrit, checkDodge, calcAgilityDodge, calcFinalDodge, effectiveSpeed } from "./formulas";
+import { DODGE_HARD_CAP } from "./constants";
 
 const EMPTY_RESULT: DamageResult = {
   finalDamage: 0,
@@ -64,8 +65,22 @@ export class DamagePipeline {
     let rawDamage = ctx.rawDamage;
     trace.push(`  原始伤害: ${rawDamage}`);
 
-    const dodgeRate = this.effectManager.getModifierTotal(ctx.target, "dodgeRate");
-    trace.push(`  闪避判定: 闪避率=${dodgeRate}%${formatModBreakdown(ctx.target, "dodgeRate") !== "无" ? ` (${formatModBreakdown(ctx.target, "dodgeRate")})` : ""}`);
+    // 闪避率 = dodgeRate 修正 + 身法差贡献，硬上限 DODGE_HARD_CAP；被冰冻/眩晕时归零。
+    const baseDodgeRate = this.effectManager.getModifierTotal(ctx.target, "dodgeRate");
+    const immobilized = this.effectManager.isImmobilized(ctx.target);
+    const defenderSpeed = effectiveSpeed(ctx.target);
+    const attackerSpeed = effectiveSpeed(ctx.source);
+    const agiDodge = immobilized ? 0 : calcAgilityDodge(defenderSpeed, attackerSpeed);
+    const dodgeRate = calcFinalDodge(baseDodgeRate, agiDodge);
+    const dodgeBreakdown = formatModBreakdown(ctx.target, "dodgeRate");
+    const agiNote = immobilized
+      ? "（冰冻/眩晕，无法闪避）"
+      : `（身法 ${defenderSpeed} vs ${attackerSpeed} → +${agiDodge.toFixed(1)}%）`;
+    trace.push(
+      `  闪避判定: 基础修正=${baseDodgeRate}%${dodgeBreakdown !== "无" ? ` (${dodgeBreakdown})` : ""}` +
+      `，身法差=${agiDodge.toFixed(1)}%${agiNote}` +
+      ` → 合计=${dodgeRate.toFixed(1)}%（硬上限${DODGE_HARD_CAP}%）`,
+    );
     if (checkDodge(dodgeRate)) {
       trace.push(`  → 闪避成功!`);
       this.dispatcher.emit("dodge", {

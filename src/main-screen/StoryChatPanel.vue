@@ -13,6 +13,8 @@ import { generateNpcReevaluation } from "../ai/npc_reevaluation_generate";
 import type { CultivationInput } from "../ai/cultivation_types";
 import { protagonist, Protagonist } from "../role_core/Protagonist";
 import { npcStore } from "../role_core/npcStore";
+import { factionStore, type Faction } from "../role_core/factionStore";
+import { chapterStore, type Chapter } from "../role_core/chapterStore";
 import { worldMapStore, type WorldMapSerialData } from "../role_core/worldMapStore";
 import { storyStore, type StorySerialData, type ChatMessage } from "../role_core/storyStore";
 import { writeActiveSave, getActiveDifficulty } from "../save/gameSave";
@@ -34,6 +36,13 @@ import type { WorldLocation } from "../role_core/types/worldLocation";
 import { formatWorldLocationDash, isEmptyWorldLocation, isWorldLocationEqual } from "../role_core/types/worldLocation";
 import type { Npc } from "../role_core/Npc";
 import { setTurnBusy } from "../role_core/turnLock";
+import {
+  applySceneReport,
+  buildSceneDirective,
+  isSceneClosing,
+  noteBattleInScene,
+  noteSceneTurn,
+} from "../role_core/sceneBudgetStore";
 import { flushPendingEdits } from "../role_core/pendingEdits";
 import { MEMORY_COMPRESS_TARGET, MEMORY_COMPRESS_THRESHOLD } from "../role_core/types/playInfo";
 import { autoGeneratePortraits, autoGenerateLocationBackgrounds } from "../image_generate";
@@ -84,7 +93,7 @@ const inputText = ref("");
 const generating = ref(false);
 const generatingPhase = ref<"story" | "state" | "summary">("story");
 const genError = ref("");
-/** 当前显示的四个行动建议（来自状态 AI）。null 时隐藏按钮区。 */
+/** 当前显示的推进选项（来自状态 AI，协议格式数组）。null 时隐藏按钮区。 */
 const actionOptions = storyStore.actionOptions;
 
 function beginGenerating(): void {
@@ -109,9 +118,30 @@ function autoResizeTextarea(): void {
 }
 
 /** 点击快捷选项：填入输入框（玩家可编辑后手动发送），并触发 textarea 自适应高度。 */
+/**
+ * 点击推进选项：把选项正文填入输入框。
+ *
+ * 采用**追加**而非覆盖——玩家可能想把两条选项拼成一段完整的行动描述，
+ * 覆盖写法会让先点的那一条凭空消失。已包含相同文本时不再重复追加（连点同一条无副作用）。
+ */
 function useActionOption(text: string): void {
-  inputText.value = text;
-  nextTick(() => autoResizeTextarea());
+  const t = text.trim();
+  if (!t) return;
+  const cur = inputText.value.trim();
+  if (cur === t) {
+    nextTick(() => autoResizeTextarea());
+    return;
+  }
+  // 已追加过同一条 → 不再重复（避免连点堆出多份）。
+  if (cur && cur.includes(t)) {
+    nextTick(() => autoResizeTextarea());
+    return;
+  }
+  inputText.value = cur ? `${cur}\n${t}` : t;
+  nextTick(() => {
+    autoResizeTextarea();
+    textareaRef.value?.focus();
+  });
 }
 
 let abortCtl: AbortController | null = null;
@@ -206,6 +236,7 @@ async function maybeGenerateGrandSummary(
       model,
       oldGrandSummary: grandSummary.value,
       snapshots: toSummarize,
+      protagonistGender: protagonist.value?.gender,
       signal,
     });
     if (signal.aborted) return;
@@ -250,6 +281,8 @@ interface RoundContext {
 interface PreGenSnapshot {
   inventorySlots: Array<InventoryStackItem | null>;
   npcs: NpcPlayInfo[];
+  factions: Faction[];
+  chapter: Chapter | null;
   worldMap: WorldMapSerialData;
   story: StorySerialData;
   pendingBattleTrigger: BattleTriggerEntry | null;
@@ -268,6 +301,8 @@ function capturePreGenSnapshot(ctx: RoundContext): PreGenSnapshot | null {
   return {
     inventorySlots: p.inventorySlots.map(s => s ? JSON.parse(JSON.stringify(s)) as InventoryStackItem : null),
     npcs: npcStore.serializeNpcs(),
+    factions: factionStore.serializeFactions(),
+    chapter: chapterStore.serializeChapter(),
     worldMap: worldMapStore.serializeWorldMap(),
     story: storyStore.serializeStory(),
     pendingBattleTrigger: pendingBattleTrigger.value,
@@ -291,6 +326,9 @@ function restorePreGenSnapshot(): void {
     Protagonist.notifyChanged();
   }
   npcStore.restoreNpcs(snap.npcs);
+  factionStore.restoreFactions(snap.factions ?? []);
+  // 篇章回合数也要回退：重试等于这一轮没发生过。
+  chapterStore.restoreChapter(snap.chapter ?? null);
   worldMapStore.restoreWorldMap(snap.worldMap);
   storyStore.applyStorySnapshot(snap.story);
   pendingBattleTrigger.value = snap.pendingBattleTrigger;
@@ -486,6 +524,21 @@ async function applyStateResult(stateResult: StateParsed, linggen: string[]): Pr
     gameLog.error("[StoryChat] NPC 更新失败：" + (e instanceof Error ? e.message : String(e)));
   }
 
+  // ⑤-2 势力变更事件（状态 AI 第 15 段 <MJ_FACTION_TAG>）。
+  // update 指向未登记的势力时 applyFactionChange 返回 false —— 宁可漏更新，
+  // 也不凭空造一个玩家没探知过的势力。
+  try {
+    for (const change of stateResult.factionChanges) {
+      if (!factionStore.applyFactionChange(change)) {
+        gameLog.warn(
+          `[StoryChat] 势力变更被丢弃：op=${change.op} name=${change.name}（update 时该势力尚未登记）`,
+        );
+      }
+    }
+  } catch (e) {
+    gameLog.error("[StoryChat] 势力更新失败：" + (e instanceof Error ? e.message : String(e)));
+  }
+
   // ⑥ 登记新地点到世界地图。
   try {
     if (stateResult.worldLocation && !isEmptyWorldLocation(stateResult.worldLocation)) {
@@ -514,6 +567,8 @@ async function applyStateResult(stateResult: StateParsed, linggen: string[]): Pr
   }
 
   actionOptions.value = stateResult.actionOptions;
+  // 记录本轮推进轴，供下轮做跨回合轮换（保留最近 3 轮）。
+  storyStore.noteBranchAxes(stateResult.actionOptions);
   return { gameOverReason };
 }
 
@@ -613,6 +668,10 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
   // 必须在 push 用户消息之前——否则存的就是「本回合开始后」的状态，回滚点会错位。
   captureAutoTurnSave();
 
+  // 上轮选项正文：状态 AI 用它做"防复读"（玩家没选的就是拒绝了）。
+  // 必须在 actionOptions 清空之前取出。
+  const prevOptionTexts = actionOptions.value?.map(o => o.text) ?? [];
+
   actionOptions.value = null;
   chatMessages.value.push({ type: "user", content: ctx.userContent });
   beginGenerating();
@@ -622,6 +681,10 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
 
   const ac = new AbortController();
   abortCtl = ac;
+
+  // 场景配额硬约束：按「上一回合结束时」的场景进度算出，注入剧情 AI 与状态 AI。
+  // 未进入分层场景或尚未触顶时为空串，不会额外占用提示词。
+  const sceneDirective = buildSceneDirective();
 
   try {
     // 阶段 1：生成剧情正文（修炼走 generateCultivationStory，其余走 generateStory）。
@@ -652,6 +715,7 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
         currentMastery: ci.currentMastery,
         currentMasteryExp: ci.currentMasteryExp,
         masteryThreshold: ci.masteryThreshold,
+        maxLayer: ci.maxLayer,
         spiritStoneCount: ci.spiritStoneCount,
         estimatedMonths: ci.estimatedMonths,
         protagonist: p,
@@ -670,6 +734,7 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
         chatHistory,
         sceneNpcSnapshot: buildSceneNpcSnapshot() || undefined,
         currentWorldLocation: props.currentWorldLocation ? formatWorldLocationDash(props.currentWorldLocation) : undefined,
+        sceneDirective,
         signal: ac.signal,
       });
       storyBody = storyResult.storyBody;
@@ -695,12 +760,31 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
         currentWorldLocation: props.currentWorldLocation ?? undefined,
         currentWorldTime: props.worldTime,
         npcSnapshot: npcSnapshot || undefined,
+        recentBranchAxes: storyStore.recentBranchAxes(),
+        recentOptionTexts: prevOptionTexts,
+        sceneDirective,
         signal: ac.signal,
       });
 
       if (abortCtl !== ac) return;
 
+      // 合并本回合 AI 报的场景进度（秘境层 / 擂台轮），供下一轮算配额。
+      applySceneReport(stateResult.sceneReport);
+
+      // 硬闸：场景已进收束锁时，直接吃掉战斗触发——不是求 AI 别打，是让它打不起来。
+      if (isSceneClosing() && stateResult.battleTrigger) {
+        gameLog.info(
+          `[场景配额] 收束锁生效，本回合的战斗触发已被拦截（${stateResult.battleTrigger.triggerReason || "无原因"}）`,
+        );
+        stateResult.battleTrigger = null;
+      }
+
       const { gameOverReason } = await applyStateResult(stateResult, p.linggen);
+
+      // 本场景又过了一回合：这是层/轮推进与收束判定的真正来源（不依赖 AI 报数）。
+      noteSceneTurn();
+      // 篇章回合数 +1（同样不依赖 AI 报数；无篇章时内部直接返回）。
+      chapterStore.noteChapterTurn();
 
       if (stateResult.storySnapshot.trim()) {
         const last = chatMessages.value[chatMessages.value.length - 1];
@@ -961,6 +1045,10 @@ watch(
   async (result) => {
     if (!result) return;
     emit("consumeBattleResult");
+    // 本场景已发生一场战斗：程序侧独立计数并按地点归并，AI 不报数也能拦住刷波。
+    noteBattleInScene(
+      props.currentWorldLocation ? formatWorldLocationDash(props.currentWorldLocation) : "",
+    );
     if (result.protagonistDied) {
       // 战败身亡：先展示战斗结算气泡（与非死亡战斗一致），再生成走马灯结局叙事，完成后触发 game over。
       chatMessages.value.push({ type: "user", content: formatBattleResultMessage(result) });
@@ -1118,36 +1206,14 @@ watch(
             aria-label="快捷行动选项"
           >
             <button
+              v-for="(opt, i) in actionOptions"
+              :key="i"
               type="button"
               class="action-option"
-              @click="useActionOption(actionOptions.aggressive)"
-              :title="actionOptions.aggressive"
+              @click="useActionOption(opt.text)"
+              :title="opt.text"
             >
-              <span class="action-option__text">{{ actionOptions.aggressive }}</span>
-            </button>
-            <button
-              type="button"
-              class="action-option"
-              @click="useActionOption(actionOptions.moderate)"
-              :title="actionOptions.moderate"
-            >
-              <span class="action-option__text">{{ actionOptions.moderate }}</span>
-            </button>
-            <button
-              type="button"
-              class="action-option"
-              @click="useActionOption(actionOptions.cautious)"
-              :title="actionOptions.cautious"
-            >
-              <span class="action-option__text">{{ actionOptions.cautious }}</span>
-            </button>
-            <button
-              type="button"
-              class="action-option"
-              @click="useActionOption(actionOptions.veryCautious)"
-              :title="actionOptions.veryCautious"
-            >
-              <span class="action-option__text">{{ actionOptions.veryCautious }}</span>
+              <span class="action-option__text">{{ opt.text }}</span>
             </button>
           </div>
           <textarea

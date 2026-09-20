@@ -13,6 +13,7 @@
 import { ref } from "vue";
 import type { OpeningStoryPhase } from "../ai/useOpeningStory";
 import type { ActionSuggestions } from "../ai/state_generate";
+import { normalizeActionSuggestions } from "../ai/state_generate";
 import type { WorldLocation } from "./types/worldLocation";
 import type { WorldTime } from "./worldTime";
 import { cloneWorldTime, createDefaultWorldTime } from "./worldTime";
@@ -35,8 +36,11 @@ export interface StorySerialData {
   worldTimeBaseline: WorldTime;
   worldLocation: WorldLocation | null;
   initSnapshot: string;
+  /** 推进选项（协议格式数组；旧存档为四倾向对象，读档时归一化）。 */
   actionOptions: ActionSuggestions | null;
   chatMessages: ChatMessage[];
+  /** 最近 3 轮出现过的推进轴（每轮一个数组），用于跨回合轮换提示。 */
+  branchAxisRounds?: string[][];
   /** 滚动大总结（约 1000 字剧情总纲），替代已被压缩的旧轮快照。空串表示无大总结。 */
   grandSummary: string;
   /** 大总结覆盖到的 chatMessages 索引（不含）；index < 此值的 story 已被吃进大总结。 */
@@ -51,6 +55,8 @@ const worldLocation = ref<WorldLocation | null>(null);
 const initSnapshot = ref("");
 const actionOptions = ref<ActionSuggestions | null>(null);
 const chatMessages = ref<ChatMessage[]>([]);
+/** 最近若干轮出现过的推进轴（每轮一组，最多保留 3 轮），供状态 AI 做跨回合轮换。 */
+const branchAxisRounds = ref<string[][]>([]);
 /** 滚动大总结（约 1000 字剧情总纲）。空串表示尚无大总结。 */
 const grandSummary = ref("");
 /** 大总结覆盖到的 chatMessages 索引（不含）；index < 此值的 story 已被吃进大总结。 */
@@ -74,12 +80,32 @@ function clearStory(): void {
   worldTimeBaseline.value = cloneWorldTime(w);
   worldLocation.value = null;
   initSnapshot.value = "";
-    actionOptions.value = null;
-    chatMessages.value = [];
+  actionOptions.value = null;
+  chatMessages.value = [];
+  branchAxisRounds.value = [];
     grandSummary.value = "";
     grandSummaryUpTo.value = 0;
     gameOverReason.value = "";
     restored.value = false;
+}
+
+/**
+ * 记录本轮推进选项用到的推进轴（保留最近 3 轮），供状态 AI 做跨回合轮换。
+ * 空轴（"未分类"）不记，避免污染轮换提示。
+ */
+function noteBranchAxes(items: ActionSuggestions | null): void {
+  if (!items || items.length === 0) return;
+  const axes = Array.from(new Set(
+    items.map(i => (i.axis || "").trim()).filter(a => a && a !== "未分类"),
+  ));
+  if (axes.length === 0) return;
+  const next = branchAxisRounds.value.concat([axes]);
+  branchAxisRounds.value = next.slice(-3);
+}
+
+/** 最近 3 轮出现过的推进轴（扁平去重，供 prompt 注入）。 */
+function recentBranchAxes(): string[] {
+  return Array.from(new Set(branchAxisRounds.value.flat().map(a => a.trim()).filter(Boolean)));
 }
 
 /** 序列化当前剧情状态为纯 JSON（深拷贝，断开与响应式引用的联系）。 */
@@ -95,6 +121,7 @@ function serializeStory(): StorySerialData {
     chatMessages: chatMessages.value.map((m) => ({ ...m })),
     grandSummary: grandSummary.value,
     grandSummaryUpTo: grandSummaryUpTo.value,
+    branchAxisRounds: branchAxisRounds.value.map(r => r.slice()),
   };
 }
 
@@ -110,10 +137,11 @@ function restoreStory(data: StorySerialData | null | undefined): void {
     : createDefaultWorldTime();
   worldLocation.value = d.worldLocation ? { ...d.worldLocation } : null;
   initSnapshot.value = d.initSnapshot || "";
-  actionOptions.value = d.actionOptions ?? null;
+  actionOptions.value = normalizeActionSuggestions(d.actionOptions);
   chatMessages.value = (d.chatMessages ?? []).map((m) => ({ ...m }));
   grandSummary.value = d.grandSummary ?? "";
   grandSummaryUpTo.value = d.grandSummaryUpTo ?? 0;
+  branchAxisRounds.value = Array.isArray(d.branchAxisRounds) ? d.branchAxisRounds.map(r => r.slice()) : [];
   restored.value = true;
 }
 
@@ -134,10 +162,11 @@ function applyStorySnapshot(data: StorySerialData | null | undefined): void {
     : createDefaultWorldTime();
   worldLocation.value = d.worldLocation ? { ...d.worldLocation } : null;
   initSnapshot.value = d.initSnapshot || "";
-  actionOptions.value = d.actionOptions ?? null;
+  actionOptions.value = normalizeActionSuggestions(d.actionOptions);
   chatMessages.value = (d.chatMessages ?? []).map((m) => ({ ...m }));
   grandSummary.value = d.grandSummary ?? "";
   grandSummaryUpTo.value = d.grandSummaryUpTo ?? 0;
+  branchAxisRounds.value = Array.isArray(d.branchAxisRounds) ? d.branchAxisRounds.map(r => r.slice()) : [];
 }
 
 export const storyStore = {
@@ -153,8 +182,11 @@ export const storyStore = {
   grandSummaryUpTo,
   gameOverReason,
   restored,
+  branchAxisRounds,
   clearStory,
   serializeStory,
   restoreStory,
   applyStorySnapshot,
+  noteBranchAxes,
+  recentBranchAxes,
 };

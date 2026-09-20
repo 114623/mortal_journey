@@ -34,6 +34,7 @@ import {
   isItemTier,
   describeTierSuppression,
   describeGongfaCultivation,
+  tierIndex,
 } from "../role_core/types/itemTier";
 import type { ItemTier } from "../role_core/types/itemTier";
 import type {
@@ -52,6 +53,7 @@ import {
   rollTreasureSpecialEffect,
 } from "../role_core/types/treasure";
 import { GONGFA_SYSTEM_KEYS, rollGongfaFunction } from "../role_core/types/gongfa";
+import { inheritGongfaProgress } from "../role_core/realmUtils";
 import type { ElixirEffectType } from "../role_core/types/elixir";
 import {
   VALID_ELIXIR_EFFECT_TYPES,
@@ -115,7 +117,7 @@ const owner = computed(() => {
 
 const isProtagonistOwner = computed(() => selectedOwnerKey.value === PROTAGONIST_KEY);
 
-/** 角色列表：主角 + 全部 NPC（在场 → 休眠 → 离开 → 已故）。 */
+/** 角色列表：主角 + 全部 NPC（按最近出场排序，已故者沉底）。 */
 const owners = computed<OwnerEntry[]>(() => {
   const out: OwnerEntry[] = [];
   const p = protagonist.value;
@@ -131,8 +133,10 @@ const owners = computed<OwnerEntry[]>(() => {
     npc: n,
     rank: n.isDead ? 3 : n.presence === "active" ? 0 : n.presence === "dormant" ? 1 : 2,
   }));
-  npcs.sort((a, b) => a.rank - b.rank || a.npc.displayName.localeCompare(b.npc.displayName, "zh"));
-  for (const { npc, rank } of npcs) {
+  // 纯粹按最近出场排序：已故者不可能再出场，统一沉底（组内仍按最近出场）。
+  const alive = npcStore.sortByRecent(npcs.filter(x => !x.npc.isDead));
+  const dead = npcStore.sortByRecent(npcs.filter(x => x.npc.isDead));
+  for (const { npc, rank } of [...alive, ...dead]) {
     const tag = npc.isDead ? " · 已故" : npc.presence === "active" ? " · 在场" : "";
     out.push({
       key: npc.id,
@@ -237,6 +241,8 @@ interface ForgeDraft {
   effectType: ElixirEffectType;
   elixirValue: number;
   elixirIsPercent: boolean;
+  /** 功法专用：承继哪门功法的修炼进度（空 = 不承继）。 */
+  inheritFrom: string;
 }
 
 const selectedKey = ref<string | null>(null);
@@ -269,6 +275,7 @@ function emptyDraft(g: ItemGrade, t: ItemTier): ForgeDraft {
     effectType: "恢复血量",
     elixirValue: 1,
     elixirIsPercent: false,
+    inheritFrom: "",
   };
 }
 
@@ -299,6 +306,7 @@ function loadDraft(it: InventoryStackItem): ForgeDraft {
     d.bonusValue = Number(bonus[d.bonusStat] ?? 0) || 0;
     d.system = typeof anyIt.system === "string" ? anyIt.system : GONGFA_SYSTEM_KEYS[0];
     d.role = typeof anyIt.role === "string" ? anyIt.role : "攻击";
+    d.inheritFrom = typeof anyIt.inheritFrom === "string" ? anyIt.inheritFrom : "";
   } else if (anyIt.itemType === "丹药") {
     d.effectType = (typeof anyIt.effectType === "string" ? anyIt.effectType : "恢复血量") as ElixirEffectType;
     const eff = (anyIt.effects ?? {}) as { value?: number; isPercent?: boolean };
@@ -641,6 +649,7 @@ function onSave(): void {
   const d = draft.value;
   if (!it || !d) return;
   const rec = it as unknown as Record<string, unknown>;
+  let extraHint = "";
 
   rec.name = d.name.trim() || rec.name;
   rec.grade = d.grade;
@@ -657,6 +666,19 @@ function onSave(): void {
     rec.bonus = { [d.bonusStat]: Math.max(0, Math.round(d.bonusValue)) };
     rec.system = d.system;
     rec.role = d.role;
+    // 承继：续篇沿用原功法的修炼进度（按进度比例映射，因两者层数上限不同）。
+    const wantInherit = d.inheritFrom.trim();
+    if (wantInherit !== String(rec.inheritFrom ?? "")) {
+      const src = findGongfaByName(wantInherit);
+      const got = src ? inheritGongfaProgress(src, rec as unknown as GongfaItemDefinition) : null;
+      if (got) {
+        rec.mastery = got.mastery;
+        rec.masteryExp = got.masteryExp;
+        extraHint = `已承继「${wantInherit}」的修炼进度，现为第 ${got.mastery} 层。`;
+      }
+      if (wantInherit) rec.inheritFrom = wantInherit;
+      else delete rec.inheritFrom;
+    }
   } else if (rec.itemType === "丹药") {
     rec.effectType = d.effectType;
     rec.effects = {
@@ -667,7 +689,7 @@ function onSave(): void {
 
   persist();
   draft.value = loadDraft(it);
-  hint.value = "已保存并立即生效。";
+  hint.value = extraHint || "已保存并立即生效。";
 }
 
 function onRevert(): void {
@@ -678,6 +700,54 @@ function onRevert(): void {
 }
 
 // ── 展示辅助 ────────────────────────────────────────────────────────────────
+
+/**
+ * 可承继的来源功法：当前角色名下（功法栏 + 储物袋）除本门以外的其他功法。
+ *
+ * 「承继」用于机缘场景——得到某门功法的后续篇（筑基篇 / 前辈续写 / 补全残卷）时，
+ * 可沿用原功法的修炼进度，而非从第一层重练。
+ */
+const inheritSourceNames = computed<string[]>(() => {
+  if (selectedType.value !== "功法") return [];
+  const c = owner.value;
+  const self = currentItem();
+  const selfName = self ? String((self as unknown as Record<string, unknown>).name ?? "") : "";
+  const selfTierRaw = self ? (self as unknown as Record<string, unknown>).tier : undefined;
+  if (!c) return [];
+  const seen = new Set<string>();
+  const collect = (arr: readonly unknown[]): void => {
+    for (const it of arr) {
+      if (!it || typeof it !== "object") continue;
+      const rec = it as Record<string, unknown>;
+      if (rec.itemType !== "功法") continue;
+      const n = typeof rec.name === "string" ? rec.name.trim() : "";
+      if (!n || n === selfName) continue;
+      // 只列出不高于自身的功法：续篇承继前作，反向没有意义。
+      if (typeof selfTierRaw === "string" && typeof rec.tier === "string") {
+        if (tierIndex(rec.tier) > tierIndex(selfTierRaw)) continue;
+      }
+      seen.add(n);
+    }
+  };
+  collect(c.gongfaSlots as readonly unknown[]);
+  collect(c.inventorySlots as readonly unknown[]);
+  return Array.from(seen);
+});
+
+/** 按名字在当前角色名下找一门功法（用于承继进度）。 */
+function findGongfaByName(name: string): GongfaItemDefinition | null {
+  const c = owner.value;
+  if (!c || !name) return null;
+  const scan = (arr: readonly unknown[]): GongfaItemDefinition | null => {
+    for (const it of arr) {
+      if (!it || typeof it !== "object") continue;
+      const rec = it as Record<string, unknown>;
+      if (rec.itemType === "功法" && rec.name === name) return it as GongfaItemDefinition;
+    }
+    return null;
+  };
+  return scan(c.gongfaSlots as readonly unknown[]) ?? scan(c.inventorySlots as readonly unknown[]);
+}
 
 const tierHint = computed(() => {
   const d = draft.value;
@@ -919,10 +989,24 @@ onUnmounted(() => {
 
               <div class="mj-forge__sec">
                 <div class="mj-forge__sec-head">
+                  <span>承继修炼进度</span>
+                </div>
+                <select v-model="draft.inheritFrom" class="mj-forge__select">
+                  <option value="">（无）</option>
+                  <option v-for="n in inheritSourceNames" :key="n" :value="n">{{ n }}</option>
+                </select>
+                <p class="mj-forge__hintline">
+                  若此功法是某门旧功法的后续篇（筑基篇 / 前辈续写 / 补全残卷），选定原功法后保存，
+                  即可沿用它的修炼进度——按进度比例折算到本篇的层数，而不必从第一层重练。
+                </p>
+              </div>
+
+              <div class="mj-forge__sec">
+                <div class="mj-forge__sec-head">
                   <span>战斗效果</span>
                   <button type="button" class="mj-forge__mini" @click="rerollGongfaFunction">按体系+品阶重掷</button>
                 </div>
-                <p class="mj-forge__hintline">重掷会整体替换招式名 / 简介 / 效果，熟练度与层数保留。</p>
+                <p class="mj-forge__hintline">重掷会整体替换招式名 / 简介 / 效果，修炼进度与层数保留。</p>
               </div>
             </template>
 

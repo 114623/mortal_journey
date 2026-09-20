@@ -1,5 +1,6 @@
 import { FINALE_STORY_SYSTEM_PRESET } from "./finale_story_preset";
-import { formatStoryOutline } from "./story_preset";
+import { formatMainline } from "./story_preset";
+import { genderLine } from "./genderGuard";
 import { getWorldPreset } from "../role_core/worldSettingsStore";
 import {
   completeChatWithMessagesJson,
@@ -88,7 +89,7 @@ function buildFinaleUserContent(input: FinaleStoryInput): string {
     "",
     "【主角生平】",
     `姓名：${p.displayName}`,
-    `性别：${p.gender || "—"}`,
+    genderLine(p.gender),
     `境界：${p.realm.major}${p.realm.minor}${p.realmComplete ? "·圆满" : ""}`,
     `灵根：${linggenText}`,
     `享年：${p.age}岁（寿元上限${p.shouyuan}岁）`,
@@ -115,8 +116,8 @@ export function buildFinaleStoryRequestPayload(input: FinaleStoryInput): JsonCha
   }
 
   const systemParts = [getWorldPreset().preset, FINALE_STORY_SYSTEM_PRESET];
-  // 玩家写的剧情脉络（非空才注入），收尾时尽量呼应。
-  const outline = formatStoryOutline(getWorldPreset());
+  // 玩家写的主线（非空才注入），收尾时尽量呼应这条长期方向。
+  const outline = formatMainline(getWorldPreset());
   if (outline) systemParts.push(outline);
   if (storyParts.length > 0) {
     systemParts.push("【主角的一生轨迹】\n" + storyParts.join("\n\n---\n\n"));

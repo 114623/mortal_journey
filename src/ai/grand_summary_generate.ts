@@ -1,4 +1,5 @@
 import { GRAND_SUMMARY_SYSTEM_PRESET } from "./grand_summary_preset";
+import { genderRule } from "./genderGuard";
 import { extractTagContent } from "./parseAiItem";
 import {
   completeChatWithMessagesJson,
@@ -18,6 +19,11 @@ export interface GrandSummaryGenerateInput {
   oldGrandSummary: string;
   /** 待总结的一批逐轮快照（按时间顺序排列）。 */
   snapshots: string[];
+  /**
+   * 主角性别（可选）：总纲是长期留存的浓缩文本，一旦写错性别就会被后续每轮读回。
+   * 传入后会在 system 末尾追加称呼硬约束，并在压缩时顺手纠正快照里的相反称谓。
+   */
+  protagonistGender?: string;
 }
 
 export interface GrandSummaryParsed {
@@ -54,8 +60,14 @@ function buildGrandSummaryUserContent(input: GrandSummaryGenerateInput): string 
 }
 
 function buildGrandSummaryRequestPayload(input: GrandSummaryGenerateInput): JsonChatRequestPayload {
+  // 总纲是长期留存的浓缩文本：把性别称呼硬约束一并压进去，避免浓缩过程中
+  // 把快照里的相反称谓（如旧记忆写成的"儿子"）固化下来，再污染后续每一轮剧情。
+  const genderHint = genderRule(input.protagonistGender);
+  const systemParts = [GRAND_SUMMARY_SYSTEM_PRESET];
+  if (genderHint) systemParts.push(genderHint);
+
   const messages: ChatMessage[] = [
-    { role: "system", content: GRAND_SUMMARY_SYSTEM_PRESET },
+    { role: "system", content: systemParts.join("\n\n") },
     { role: "user", content: buildGrandSummaryUserContent(input) },
   ];
 

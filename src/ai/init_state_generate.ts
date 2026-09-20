@@ -1,6 +1,7 @@
 import { INIT_STATE_SYSTEM_PRESET } from "./init_state_preset";
 import { extractTagContent, tryParseJsonArray, parseEquipObject, parseGongfaObject, parseStorageObject } from "./parseAiItem";
 import { completeChatWithMessagesJson, type JsonChatRequestPayload } from "./openAiChatBridge";
+import { genderLine } from "./genderGuard";
 import {
   EQUIP_SLOT_COUNT,
   REALM_ORDER,
@@ -222,7 +223,7 @@ function buildInitStateUserContent(input: InitStateGenerateInput): string {
     "",
     "【主角初始状态】",
     `姓名：${p.displayName}`,
-    `性别：${p.gender || "—"}`,
+    genderLine(p.gender),
     `境界：${p.realm.major}${p.realm.minor}`,
     `灵根：${p.linggen.join("") || "无"}`,
     `出身地点：${p.birthPlace ? formatWorldLocationDash(p.birthPlace) : "—"}`,

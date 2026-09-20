@@ -37,11 +37,39 @@ export function expandTo10(endpoints: LayerEndpoints): readonly number[] {
   return result;
 }
 
+/**
+ * 在一条「第1层 → 第N层」的曲线上按**连续**层号取样。
+ *
+ * 层号可以是小数（功法层数上限由阶层决定，需把「第 3/5 层」映射到 10 层曲线的
+ * 连续位置），相邻两点间线性插值；整数层号的行为与旧版完全一致。
+ */
+function sampleLayerCurve(arr: readonly number[], layer: number): number {
+  const n = arr.length;
+  if (n === 0) return 0;
+  const pos = Math.max(0, Math.min(layer - 1, n - 1));
+  const i0 = Math.floor(pos);
+  const i1 = Math.min(n - 1, i0 + 1);
+  const f = pos - i0;
+  return arr[i0] + (arr[i1] - arr[i0]) * f;
+}
+
+/**
+ * 把「第 `layer` 层 / 共 `maxLayer` 层」映射到 10 层基准曲线的连续位置（1~10）。
+ *
+ * 功法的数值区间写成 [第1层, 第10层]，但低阶功法只有三五层——此时每跨一层
+ * 走完基准曲线上更大的一段：练气功法（5 层）第 5 层即达到区间上限。
+ */
+export function resolveGongfaLayer10(layer: number, maxLayer: number): number {
+  const m = Math.max(1, Math.floor(maxLayer));
+  const l = Math.max(1, Math.min(layer, m));
+  if (m <= 1) return 10;
+  return 1 + (l - 1) * 9 / (m - 1);
+}
+
 export function atLayer(val: LayerValue, layer: number): number {
   if (typeof val === "number") return val;
   const arr = val.length === 2 ? expandTo10(val) : val;
-  const idx = Math.max(0, Math.min(layer - 1, arr.length - 1));
-  return arr[idx];
+  return Math.round(sampleLayerCurve(arr, layer));
 }
 
 function expandTo10Float(endpoints: LayerEndpoints): readonly number[] {
@@ -56,8 +84,7 @@ function expandTo10Float(endpoints: LayerEndpoints): readonly number[] {
 export function atLayerFloat(val: LayerValue, layer: number): number {
   if (typeof val === "number") return val;
   const arr = val.length === 2 ? expandTo10Float(val) : val;
-  const idx = Math.max(0, Math.min(layer - 1, arr.length - 1));
-  return arr[idx];
+  return sampleLayerCurve(arr, layer);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1170,4 +1197,12 @@ export interface GongfaItemDefinition {
    * 玩家可在「天道编辑」中显式指定。
    */
   tier?: ItemTier;
+  /**
+   * 本门功法的**续作来源**——若它是某门已有功法的后续篇（筑基篇 / 前辈续写 / 补全残卷等），
+   * 记录被继承的那门功法名。
+   *
+   * 获得后续篇时可沿用原功法的修炼进度（见 `realmUtils.inheritGongfaProgress`），
+   * 不必从第一层重头再练；此处仅作溯源展示，运行时以进度数值为准。
+   */
+  inheritFrom?: string;
 }

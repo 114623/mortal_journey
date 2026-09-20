@@ -2,9 +2,13 @@
 /**
  * 游戏内「设置」弹窗。
  *
- * 目前只有一项：剧情正文字号缩放（0.8× ~ 2.0×）。
- * 设置值由 uiSettingsStore 持久化到 localStorage 并写入 CSS 变量，
- * 刷新后依然生效；本弹窗只负责交互与预览。
+ * 三项：
+ * 1. 剧情正文字号缩放（0.8× ~ 2.0×），由 uiSettingsStore 持久化到 localStorage
+ *    并写入 CSS 变量，刷新后依然生效；本弹窗只负责交互与预览。
+ * 2. 场景配额（秘境层数上限 / 擂台轮次上限 / 同场景连续战斗波次上限）——
+ *    用来拦住 AI 在秘境、擂台赛这类场景里「打完一波又来一波」的无限刷波。
+ * 3. 篇章回合上限——篇章是玩家自选的短期目标，超过后只逐级温和加压、不设硬闸。
+ * 4. 回合自动存档——保留最近 N 个回合的快照（0 = 关闭）；读取入口在侧栏「读取人生」。
  */
 import { computed, watch, onMounted, onUnmounted } from "vue";
 import { useScrollLock } from "../composables/useScrollLock";
@@ -17,6 +21,30 @@ import {
   STORY_FONT_SCALE_STEP,
   STORY_FONT_SCALE_DEFAULT,
 } from "../role_core/uiSettingsStore";
+import {
+  sceneBudget,
+  setSceneBudget,
+  resetSceneBudget,
+  resetSceneProgress,
+  SCENE_BUDGET_MIN,
+  SCENE_BUDGET_MAX,
+  SCENE_BUDGET_DEFAULT,
+  formatSceneProgress,
+  type SceneBudgetSettings,
+} from "../role_core/sceneBudgetStore";
+import {
+  chapter,
+  chapterTurnLimit,
+  setChapterTurnLimit,
+  DEFAULT_CHAPTER_TURN_LIMIT,
+  MIN_CHAPTER_TURN_LIMIT,
+  MAX_CHAPTER_TURN_LIMIT,
+} from "../role_core/chapterStore";
+import {
+  autoTurnSaveCount,
+  setAutoTurnSaveCount,
+  MAX_AUTO_TURN_SAVES,
+} from "../save/autoTurnSave";
 
 const props = defineProps<{
   open: boolean;
@@ -24,6 +52,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: [];
+  /** 请求打开「读取人生 / 切换存档」弹窗（宿主侧栏持有该弹窗，本弹窗只发信号）。 */
+  openSaves: [];
 }>();
 
 const scrollLock = useScrollLock();
@@ -55,6 +85,72 @@ function isActive(v: number): boolean {
 
 function onKeydown(ev: KeyboardEvent): void {
   if (ev.key === "Escape" && props.open) emit("close");
+}
+
+/* ---------- 场景配额 ---------- */
+
+/** 三个配额的展示元信息（顺序即面板顺序）。 */
+const budgetFields: {
+  key: keyof SceneBudgetSettings;
+  label: string;
+  hint: string;
+}[] = [
+  { key: "secretRealmLayers", label: "秘境层数上限", hint: "秘境 / 古修洞府 / 试炼塔最多几层" },
+  { key: "arenaRounds", label: "擂台轮次上限", hint: "擂台赛 / 宗门大比 / 车轮战最多几轮" },
+  { key: "turnsPerStage", label: "每层 / 每轮回合数", hint: "一层（一轮）最多写几个回合；层/轮上限 × 此值 = 场景总回合预算" },
+  { key: "battleWavesPerScene", label: "同场景战斗上限", hint: "同一场景内最多打几场；到顶后本场景不再开新战斗" },
+];
+
+const budget = computed(() => sceneBudget.value);
+
+/** 当前进行中的场景进度（如「秘境·血色禁地 2/3 层」）；不在分层场景时为空。 */
+const sceneProgressText = computed(() => formatSceneProgress());
+
+function budgetValue(key: keyof SceneBudgetSettings): number {
+  return budget.value[key];
+}
+
+function onBudgetInput(key: keyof SceneBudgetSettings, ev: Event): void {
+  const v = Number((ev.target as HTMLInputElement).value);
+  if (Number.isFinite(v)) setSceneBudget({ [key]: v });
+}
+
+function isBudgetDefault(): boolean {
+  return (Object.keys(SCENE_BUDGET_DEFAULT) as (keyof SceneBudgetSettings)[])
+    .every(k => budget.value[k] === SCENE_BUDGET_DEFAULT[k]);
+}
+
+/* ---------- 篇章 ---------- */
+
+/** 进行中的篇章进度（无篇章时为空）。 */
+const chapterActive = computed(() => {
+  const c = chapter.value;
+  return c && c.status === "active" ? c : null;
+});
+
+/** 篇章是否已超上限（用于变色提示）。 */
+const chapterOverdue = computed(() => !!chapterActive.value && chapterActive.value.turns > chapterTurnLimit.value);
+
+function onChapterLimitInput(ev: Event): void {
+  const v = Number((ev.target as HTMLInputElement).value);
+  if (Number.isFinite(v)) setChapterTurnLimit(v);
+}
+
+function resetChapterLimit(): void {
+  setChapterTurnLimit(DEFAULT_CHAPTER_TURN_LIMIT);
+}
+
+/* ---------- 回合自动存档 ---------- */
+
+/** 保留的回合快照数量（0 = 关闭）；写入时由 setAutoTurnSaveCount 夹取到 [0, MAX]。 */
+const autoTurn = computed<number>({
+  get: () => autoTurnSaveCount.value,
+  set: (v) => setAutoTurnSaveCount(v),
+});
+
+function onAutoTurnInput(ev: Event): void {
+  const v = Number((ev.target as HTMLInputElement).value);
+  if (Number.isFinite(v)) setAutoTurnSaveCount(v);
 }
 
 watch(
@@ -143,6 +239,171 @@ onUnmounted(() => {
             </p>
           </div>
         </section>
+
+        <section class="mj-settings__group">
+          <div class="mj-settings__row">
+            <span class="mj-settings__label">场景配额（防无限刷波）</span>
+            <button
+              type="button"
+              class="mj-settings__preset mj-settings__preset--reset"
+              :disabled="isBudgetDefault()"
+              @click="resetSceneBudget()"
+            >恢复默认</button>
+          </div>
+
+          <div v-for="f in budgetFields" :key="f.key" class="mj-settings__budget">
+            <div class="mj-settings__budget-head">
+              <span class="mj-settings__budget-label">{{ f.label }}</span>
+              <span class="mj-settings__value">{{ budgetValue(f.key) }}</span>
+            </div>
+            <div class="mj-settings__slider">
+              <button
+                type="button"
+                class="mj-settings__step"
+                title="减少"
+                :disabled="budgetValue(f.key) <= SCENE_BUDGET_MIN[f.key]"
+                @click="setSceneBudget({ [f.key]: budgetValue(f.key) - 1 })"
+              >−</button>
+              <input
+                class="mj-settings__range"
+                type="range"
+                :min="SCENE_BUDGET_MIN[f.key]"
+                :max="SCENE_BUDGET_MAX[f.key]"
+                :step="1"
+                :value="budgetValue(f.key)"
+                :aria-label="f.label"
+                @input="onBudgetInput(f.key, $event)"
+              />
+              <button
+                type="button"
+                class="mj-settings__step"
+                title="增加"
+                :disabled="budgetValue(f.key) >= SCENE_BUDGET_MAX[f.key]"
+                @click="setSceneBudget({ [f.key]: budgetValue(f.key) + 1 })"
+              >＋</button>
+            </div>
+            <p class="mj-settings__budget-hint">{{ f.hint }}</p>
+          </div>
+
+          <p v-if="sceneProgressText" class="mj-settings__budget-now">
+            当前场景进度：{{ sceneProgressText }}
+            <button
+              type="button"
+              class="mj-settings__linkbtn"
+              title="把当前场景进度清零，重新从第一层/第一轮开始计"
+              @click="resetSceneProgress()"
+            >清零进度</button>
+          </p>
+
+          <p class="mj-settings__hint">
+            到顶后进入「收束锁」：每回合都要求 AI 把场景收掉（脱离 + 结算 + 转场），
+            并直接拦截新的战斗触发（想再打也打不起来），直到 AI 收束为止。
+            层/轮的推进由程序按回合数掌握，AI 不报进度也拦得住。
+            修改只对新回合生效；设置保存在本机浏览器。
+          </p>
+        </section>
+
+        <section class="mj-settings__group">
+          <div class="mj-settings__row">
+            <span class="mj-settings__label">篇章回合上限</span>
+            <span class="mj-settings__value">{{ chapterTurnLimit }} 回合</span>
+            <button
+              type="button"
+              class="mj-settings__preset mj-settings__preset--reset"
+              :disabled="chapterTurnLimit === DEFAULT_CHAPTER_TURN_LIMIT"
+              @click="resetChapterLimit()"
+            >恢复默认</button>
+          </div>
+
+          <div class="mj-settings__slider">
+            <button
+              type="button"
+              class="mj-settings__step"
+              title="减少"
+              :disabled="chapterTurnLimit <= MIN_CHAPTER_TURN_LIMIT"
+              @click="setChapterTurnLimit(chapterTurnLimit - 1)"
+            >−</button>
+            <input
+              class="mj-settings__range"
+              type="range"
+              :min="MIN_CHAPTER_TURN_LIMIT"
+              :max="MAX_CHAPTER_TURN_LIMIT"
+              :step="1"
+              :value="chapterTurnLimit"
+              aria-label="篇章回合上限"
+              @input="onChapterLimitInput"
+            />
+            <button
+              type="button"
+              class="mj-settings__step"
+              title="增加"
+              :disabled="chapterTurnLimit >= MAX_CHAPTER_TURN_LIMIT"
+              @click="setChapterTurnLimit(chapterTurnLimit + 1)"
+            >＋</button>
+          </div>
+
+          <p v-if="chapterActive" class="mj-settings__budget-now" :class="{ 'is-overdue': chapterOverdue }">
+            当前篇章：{{ chapterActive.title }} — 已进行 {{ chapterActive.turns }} / {{ chapterTurnLimit }} 回合
+          </p>
+          <p v-else class="mj-settings__budget-now">当前未开启篇章，AI 不会收到任何篇章指令。</p>
+
+          <p class="mj-settings__hint">
+            超过上限后逐级温和加压（先催收拢 → 再催最近一两回合内出结果 → 最后要求本回合必须推向结果），
+            <b>不设硬闸</b> —— 篇章是方向不是枷锁，玩家在做别的事时它退为背景。
+            篇章在「世界设定 → 主线 · 篇章」里开启；设置保存在本机浏览器，跨人生生效。
+          </p>
+        </section>
+
+        <section class="mj-settings__group">
+          <div class="mj-settings__row">
+            <span class="mj-settings__label">回合自动存档</span>
+            <span class="mj-settings__value">{{ autoTurn === 0 ? "已关闭" : autoTurn + " 回合" }}</span>
+          </div>
+
+          <div class="mj-settings__slider">
+            <button
+              type="button"
+              class="mj-settings__step"
+              title="减少"
+              :disabled="autoTurn <= 0"
+              @click="setAutoTurnSaveCount(autoTurn - 1)"
+            >−</button>
+            <input
+              class="mj-settings__range"
+              type="range"
+              :min="0"
+              :max="MAX_AUTO_TURN_SAVES"
+              :step="1"
+              :value="autoTurn"
+              aria-label="回合自动存档保留数量"
+              @input="onAutoTurnInput"
+            />
+            <button
+              type="button"
+              class="mj-settings__step"
+              title="增加"
+              :disabled="autoTurn >= MAX_AUTO_TURN_SAVES"
+              @click="setAutoTurnSaveCount(autoTurn + 1)"
+            >＋</button>
+          </div>
+
+          <p class="mj-settings__hint">
+            每回合开始时另存一份快照，滚动保留最近 {{ autoTurn }} 个回合；设为 0 即关闭。
+            调小会立即淘汰超出的旧快照。快照含立绘、较占空间，数量越大越容易顶到浏览器存储上限
+            （顶到后会自动丢弃最旧快照，不影响主存档）。
+          </p>
+
+          <button
+            type="button"
+            class="mj-settings__widebtn"
+            title="打开存档列表：读取人生 / 回到某个回合快照 / 删除存档"
+            @click="emit('openSaves')"
+          >读取人生 / 切换存档</button>
+          <p class="mj-settings__hint">
+            快照与主存档都在同一份列表里：快照名形如「某某 · 第N回合」，读取即回到那一回合的开头。
+            切换前会自动把当前进度落盘，不会丢档。
+          </p>
+        </section>
       </div>
     </div>
   </div>
@@ -211,6 +472,10 @@ onUnmounted(() => {
   border: 1px solid rgba(140, 120, 83, 0.32);
   border-radius: 4px;
   background: rgba(0, 0, 0, 0.22);
+}
+
+.mj-settings__group + .mj-settings__group {
+  margin-top: 10px;
 }
 
 .mj-settings__row {
@@ -321,6 +586,78 @@ onUnmounted(() => {
   font-size: 0.64rem;
   letter-spacing: 0.12em;
   color: #8d7a5f;
+}
+
+.mj-settings__budget {
+  margin-top: 12px;
+}
+
+.mj-settings__budget-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mj-settings__budget-label {
+  font-size: 0.8rem;
+  color: #d8cbaf;
+}
+
+.mj-settings__budget-hint {
+  margin: 4px 0 0;
+  font-size: 0.66rem;
+  color: #8d7a5f;
+}
+
+.mj-settings__budget-now {
+  margin: 12px 0 0;
+  font-size: 0.72rem;
+  color: #c3ab88;
+}
+
+/* 篇章已超上限：换暖色提示，但仍只是提示，不拦任何操作 */
+.mj-settings__budget-now.is-overdue {
+  color: #e8c5a0;
+}
+
+.mj-settings__hint b {
+  color: #c3ab88;
+}
+
+.mj-settings__linkbtn {
+  margin-left: 6px;
+  padding: 2px 8px;
+  font-size: 0.68rem;
+  font-family: inherit;
+  color: #c3ab88;
+  background: none;
+  border: 1px solid var(--mj-border, rgba(140, 120, 83, 0.45));
+  border-radius: 3px;
+  cursor: pointer;
+}
+.mj-settings__linkbtn:hover {
+  border-color: var(--mj-gold, #e8c547);
+  color: #f0d9b8;
+}
+
+/* 组内的整宽动作按钮（如「读取人生」）：与预设按钮同款，但撑满一行并留出上下间距 */
+.mj-settings__widebtn {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 7px 10px;
+  font-size: 0.8rem;
+  font-family: inherit;
+  color: #c3ab88;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--mj-border, rgba(140, 120, 83, 0.45));
+  border-radius: 3px;
+  cursor: pointer;
+}
+.mj-settings__widebtn:hover {
+  border-color: var(--mj-gold, #e8c547);
+  color: #f0d9b8;
 }
 
 .mj-settings__preview-text {

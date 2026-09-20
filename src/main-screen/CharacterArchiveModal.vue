@@ -1,9 +1,13 @@
 <script setup lang="ts">
 /**
- * 人物档案总览：主角 + 全部已登场 NPC 的列表入口。
+ * 角色总览：主角 + 全部已登场 NPC 的列表入口（侧边栏入口名「角色」）。
  *
- * 点击任一人物打开 {@link CharacterProfileModal} 编辑其性格 / 外貌 / 记忆。
- * 列表按「主角 → 在场 → 休眠 → 已故」分组，NPC 组内按名字排序。
+ * 卡片与世界地图「场景NPC」同款（见 {@link NpcMiniCard}，含 HP/MP 条）：
+ * - 点 NPC 卡 → 打开 {@link NpcDetailModal}（与世界地图点人物卡一致的信息界面），
+ *   界面里的「角色设定」按钮再进 {@link CharacterProfileModal} 编辑性格/外貌/记忆；
+ * - 主角没有 NpcDetailModal 那套信息界面，点卡直接进 CharacterProfileModal。
+ *
+ * 排序：按 presence 分组（在场 → 休眠 → 离开 → 已故），组内按**最近出场**排序。
  */
 import { computed, ref, shallowRef, watch, onMounted, onUnmounted } from "vue";
 import { protagonist } from "../role_core/Protagonist";
@@ -20,6 +24,9 @@ import {
 } from "../role_core/pendingEdits";
 import { writeActiveSave } from "../save/gameSave";
 import CharacterProfileModal from "./CharacterProfileModal.vue";
+import NpcDetailModal from "./NpcDetailModal.vue";
+import NpcMiniCard from "./NpcMiniCard.vue";
+import type { Npc } from "../role_core/Npc";
 
 const props = defineProps<{
   open: boolean;
@@ -39,6 +46,10 @@ const detailOpen = ref(false);
  * 导致实例类型不再可赋值给 `Character`。
  */
 const detailTarget = shallowRef<Character | null>(null);
+
+/** 当前打开的 NPC 信息界面（与世界地图点人物卡同一套）。 */
+const npcDetailOpen = ref(false);
+const npcDetailTarget = shallowRef<Npc | null>(null);
 
 const PRESENCE_LABEL: Record<NpcPresence, string> = {
   active: "在场",
@@ -79,6 +90,7 @@ const entries = computed(() => {
     queued: boolean;
     isDead: boolean;
     deletable: boolean;
+    isProtagonist: boolean;
   }> = [];
 
   const p = protagonist.value;
@@ -88,20 +100,22 @@ const entries = computed(() => {
       character: p,
       name: p.displayName,
       sub: `${Character.formatRealm(p.realm)} · 主角`,
-      tag: "主角",
       status: profileStatus(p),
       queued: !!getPendingProfile(pendingKeyOf(p)),
       isDead: false,
       deletable: false,
+      isProtagonist: true,
+      tag: "主角",
     });
   }
 
-  const npcs = npcStore.allNpcs().slice().sort((a, b) => {
-    const pa = PRESENCE_ORDER[a.presence] ?? 9;
-    const pb = PRESENCE_ORDER[b.presence] ?? 9;
-    if (pa !== pb) return pa - pb;
-    return a.displayName.localeCompare(b.displayName, "zh-Hans-CN");
-  });
+  // 先按 presence 分桶，桶内各自按最近出场排序——避免新近出场的休眠者插到在场者前面。
+  const buckets: Npc[][] = [[], [], [], []];
+  for (const n of npcStore.allNpcs()) {
+    const idx = PRESENCE_ORDER[n.presence] ?? 3;
+    buckets[idx].push(n);
+  }
+  const npcs = buckets.flatMap(b => npcStore.sortByRecent(b));
 
   for (const npc of npcs) {
     const key = pendingKeyOf(npc);
@@ -115,6 +129,7 @@ const entries = computed(() => {
       queued: !!getPendingProfile(key) || !!getPendingNpcBasics(key),
       isDead: npc.isDead,
       deletable: true,
+      isProtagonist: false,
     });
   }
 
@@ -124,11 +139,35 @@ const entries = computed(() => {
 /** 列表中待删除确认的角色（二次点击才真正删除）。 */
 const pendingDelete = ref<string | null>(null);
 
+/**
+ * 点卡片：NPC 开信息界面（同世界地图），主角直接开角色设定编辑。
+ *
+ * 信息界面里的「角色设定」按钮再通到 {@link CharacterProfileModal}，
+ * 与 {@link NpcDetailModal} 内部的行为完全一致。
+ */
 function openDetail(entryIndex: number): void {
+  const entry = entries.value[entryIndex];
+  if (!entry) return;
+  if (entry.isProtagonist) {
+    detailTarget.value = entry.character;
+    detailOpen.value = true;
+    return;
+  }
+  npcDetailTarget.value = entry.character as Npc;
+  npcDetailOpen.value = true;
+}
+
+/** 卡片右侧「📝」：直接进角色设定编辑，免去先点开信息界面的两步。 */
+function openProfile(entryIndex: number): void {
   const entry = entries.value[entryIndex];
   if (!entry) return;
   detailTarget.value = entry.character;
   detailOpen.value = true;
+}
+
+function closeNpcDetail(): void {
+  npcDetailOpen.value = false;
+  npcDetailTarget.value = null;
 }
 
 function closeDetail(): void {
@@ -137,8 +176,7 @@ function closeDetail(): void {
 }
 
 /** 列表内快速删除 NPC 卡（二次点击确认）。 */
-function onEntryDelete(entryIndex: number, ev: MouseEvent): void {
-  ev.stopPropagation();
+function onEntryDelete(entryIndex: number): void {
   const entry = entries.value[entryIndex];
   if (!entry || !entry.deletable) return;
   if (pendingDelete.value !== entry.key) {
@@ -168,7 +206,7 @@ function onCloseClick(): void {
 }
 
 function onKeydown(ev: KeyboardEvent): void {
-  if (ev.key === "Escape" && props.open && !detailOpen.value) {
+  if (ev.key === "Escape" && props.open && !detailOpen.value && !npcDetailOpen.value) {
     ev.preventDefault();
     emit("close");
   }
@@ -215,45 +253,31 @@ onUnmounted(() => {
             <button type="button" class="mj-trait-modal-close" aria-label="关闭" @click="onCloseClick">
               ×
             </button>
-            <h4 class="mj-trait-modal-title">人物档案</h4>
+            <h4 class="mj-trait-modal-title">角色</h4>
             <div class="mj-trait-modal-rarity">
-              点击人物编辑性格 / 外貌 / 记忆与基本信息（回合进行中也可改，回合结束后生效）
+              点人物查看信息，信息界面内可进「角色设定」编辑性格 / 外貌 / 记忆（回合进行中也可改，回合结束后生效）
             </div>
 
             <div class="mj-archive-body">
               <div v-if="entries.length === 0" class="mj-archive-empty">
                 暂无可编辑的人物
               </div>
-              <div
+              <NpcMiniCard
                 v-for="(entry, idx) in entries"
                 :key="entry.key"
-                class="mj-archive-entry"
-                :class="{ 'mj-archive-entry--dead': entry.isDead, 'mj-archive-entry--queued': entry.queued }"
+                class="mj-archive-card"
+                :npc="entry.character"
+                :badge="entry.tag"
+                :fallback-line="entry.isProtagonist ? '主角' : undefined"
+                :action-label="'📝'"
+                :action-title="'编辑角色设定：性格 / 外貌 / 记忆'"
+                @action="openProfile(idx)"
+                :deletable="entry.deletable"
+                :armed="pendingDelete === entry.key"
+                :highlighted="entry.queued"
                 @click="openDetail(idx)"
-              >
-                <div class="mj-archive-entry__main">
-                  <span class="mj-archive-entry__name">
-                    <template v-if="entry.isDead"><s>{{ entry.name }}</s></template>
-                    <template v-else>{{ entry.name }}</template>
-                  </span>
-                  <span v-if="entry.tag" class="mj-archive-entry__tag">{{ entry.tag }}</span>
-                  <button
-                    v-if="entry.deletable"
-                    type="button"
-                    class="mj-archive-entry__del"
-                    :class="{ 'is-armed': pendingDelete === entry.key }"
-                    :title="pendingDelete === entry.key ? '再次点击确认删除' : '删除该角色卡'"
-                    @click="onEntryDelete(idx, $event)"
-                  >
-                    {{ pendingDelete === entry.key ? '确认删除' : '✕' }}
-                  </button>
-                </div>
-                <div class="mj-archive-entry__sub">{{ entry.sub }}</div>
-                <div
-                  class="mj-archive-entry__status"
-                  :class="{ 'mj-archive-entry__status--queued': entry.status === '待应用' }"
-                >画像：{{ entry.status }}</div>
-              </div>
+                @delete="onEntryDelete(idx)"
+              />
             </div>
           </div>
         </Transition>
@@ -265,13 +289,19 @@ onUnmounted(() => {
       @close="closeDetail"
       @deleted="onProfileDeleted"
     />
+    <NpcDetailModal
+      :open="npcDetailOpen"
+      :npc="npcDetailTarget"
+      @close="closeNpcDetail"
+    />
   </Teleport>
 </template>
 
 <style scoped>
 .mj-archive-root .mj-trait-modal.mj-archive-panel {
-  max-width: 420px;
-  max-height: min(76vh, 560px);
+  /* 卡片含 84px 头像与血条，比原来的单行条目宽 */
+  max-width: 460px;
+  max-height: min(80vh, 640px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -284,6 +314,10 @@ onUnmounted(() => {
   padding-right: 4px;
 }
 
+.mj-archive-card {
+  margin-bottom: 8px;
+}
+
 .mj-archive-empty {
   padding: 24px;
   text-align: center;
@@ -291,87 +325,4 @@ onUnmounted(() => {
   font-size: 0.8rem;
 }
 
-.mj-archive-entry {
-  padding: 8px 10px;
-  margin-bottom: 6px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(0, 0, 0, 0.22);
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
-}
-
-.mj-archive-entry:hover {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(232, 197, 71, 0.35);
-}
-
-.mj-archive-entry--dead {
-  opacity: 0.5;
-}
-
-.mj-archive-entry--queued {
-  border-color: rgba(120, 160, 230, 0.4);
-}
-
-.mj-archive-entry__main {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.mj-archive-entry__del {
-  margin-left: auto;
-  padding: 2px 6px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: transparent;
-  color: rgba(255, 255, 255, 0.35);
-  font-size: 0.65rem;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.mj-archive-entry__del:hover {
-  color: #f0a8a8;
-  border-color: rgba(200, 90, 90, 0.45);
-}
-
-.mj-archive-entry__del.is-armed {
-  color: #f0a8a8;
-  background: rgba(200, 90, 90, 0.18);
-  border-color: rgba(220, 110, 110, 0.7);
-}
-
-.mj-archive-entry__name {
-  font-size: 0.88rem;
-  font-weight: 600;
-  color: var(--mj-text, #e8e4dc);
-}
-
-.mj-archive-entry__tag {
-  font-size: 0.65rem;
-  padding: 0 6px;
-  line-height: 16px;
-  border-radius: 8px;
-  color: var(--mj-gold, #e8c547);
-  background: rgba(232, 197, 71, 0.14);
-}
-
-.mj-archive-entry__sub {
-  font-size: 0.72rem;
-  color: rgba(255, 255, 255, 0.55);
-  margin-top: 2px;
-}
-
-.mj-archive-entry__status {
-  font-size: 0.68rem;
-  color: var(--mj-gold-dim, #b89a4a);
-  margin-top: 2px;
-}
-
-.mj-archive-entry__status--queued {
-  color: #cfe0ff;
-}
 </style>

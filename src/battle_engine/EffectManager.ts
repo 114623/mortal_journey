@@ -188,6 +188,14 @@ export class EffectManager {
     return !combatant.effects.some(e => e.category === "cc" && e.ccType === "silence");
   }
 
+  /**
+   * 是否被「定住」——冰冻 / 眩晕。被定住的人无从闪避，身法再高也没用。
+   * 注意：恐惧、混乱、嘲讽、沉默不算定身，仍能躲。
+   */
+  isImmobilized(combatant: BattleCombatant): boolean {
+    return combatant.effects.some(e => e.category === "cc" && (e.ccType === "freeze" || e.ccType === "stun"));
+  }
+
   isFeared(combatant: BattleCombatant): boolean {
     return combatant.effects.some(e => e.category === "cc" && e.ccType === "fear");
   }

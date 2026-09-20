@@ -1,5 +1,6 @@
 import { INIT_STORY_SYSTEM_PRESET } from "./init_story_preset";
-import { formatStoryOutline } from "./story_preset";
+import { formatMainline } from "./story_preset";
+import { genderLine } from "./genderGuard";
 import { getWorldPreset } from "../role_core/worldSettingsStore";
 import { completeChatWithMessagesJson, type JsonChatRequestPayload } from "./openAiChatBridge";
 import { Protagonist } from "../role_core/Protagonist";
@@ -89,7 +90,7 @@ export function buildInitStoryUserContent(protagonist: ProtagonistPlayInfo, user
     "【开局摘要 · 请据此撰写首段剧情】",
     "",
     `姓名：${p.displayName}`,
-    `性别：${p.gender || "—"}`,
+    genderLine(p.gender),
     narrationPersonLine(p.narrationPerson),
     `境界：${Protagonist.formatRealm(p.realm)}`,
     `灵根：${Protagonist.formatLinggenElements(p.linggen)}`,
@@ -117,8 +118,8 @@ export function buildInitStoryRequestPayload(input: InitStoryGenerateInput): Jso
         content: [
           getWorldPreset().preset,
           INIT_STORY_SYSTEM_PRESET,
-          // 玩家写的剧情脉络（非空才注入），让开局就朝期望方向起步。
-          formatStoryOutline(getWorldPreset()),
+          // 玩家写的主线（非空才注入），让开局就朝这条长期方向起步。
+          formatMainline(getWorldPreset()),
         ]
           .filter(Boolean)
           .join("\n\n"),

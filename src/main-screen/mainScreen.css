@@ -167,6 +167,7 @@
 /* 左右侧栏顶条：世界时间 / 世界地点 — 同高、文案居中 */
 .main-panel__meta-strip {
   flex: 0 0 auto;
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -175,6 +176,14 @@
   box-sizing: border-box;
   border-bottom: 1px solid var(--mj-border-subtle);
   background: rgba(0, 0, 0, 0.2);
+}
+
+/* 折叠按钮 Absolute 定位到日期右侧的空白处，日期文本仍保持居中 */
+.main-panel__meta-strip > .side-collapse-btn {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
 }
 
 .main-panel__meta-strip-text {
@@ -419,7 +428,7 @@
   color: var(--mj-fg);
   line-height: 1.3;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -653,9 +662,11 @@
     order: 1;
   }
 
-  .main-screen__pane--player .side-collapse,
-  .main-screen__pane--side .side-collapse {
+  /* 折叠开关已移入内容区，这里只保证折叠态的按钮排在内容之后 */
+  .main-screen__pane--player .side-collapse-btn--collapsed,
+  .main-screen__pane--side .side-collapse-btn--collapsed {
     order: 2;
+    margin: 6px auto;
   }
 
   .main-screen__pane--collapsed {
@@ -665,57 +676,51 @@
 }
 
 /* ───────────────────────────────────────────────────────────────── */
-/* 侧栏折叠开关条：桌面端为贴剧情一侧的竖条，手机端为栏底部横条 */
+/* 侧栏折叠开关：正方形小按钮（展开态在栏内容里，折叠态在栏中央） */
 /* ───────────────────────────────────────────────────────────────── */
-.side-collapse {
-  flex: 0 0 18px;
-  display: flex;
-  flex-direction: column;
+.side-collapse-btn {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 0;
-  border: none;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--mj-border-subtle);
+  border-radius: 4px;
   background: rgba(0, 0, 0, 0.18);
   color: var(--mj-muted, #8d7a5f);
-  cursor: pointer;
   font: inherit;
+  font-size: 0.8rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
-.side-collapse:hover {
-  background: rgba(0, 0, 0, 0.32);
+.side-collapse-btn:hover {
+  background: rgba(0, 0, 0, 0.34);
   color: var(--mj-gold, #e8c547);
+  border-color: var(--mj-gold-dim, rgba(140, 120, 83, 0.6));
 }
 
-.side-collapse:focus-visible {
+.side-collapse-btn:focus-visible {
   outline: 2px solid var(--mj-gold, #e8c547);
   outline-offset: -2px;
 }
 
-/* 左栏开关贴右缘、右栏开关贴左缘（都朝向剧情区） */
-.side-collapse--at-right {
-  border-left: 1px solid var(--mj-border-subtle);
+/* 折叠态：整栏只剩这一颗按钮，顶部居中摆放 */
+.side-collapse-btn--collapsed {
+  position: relative;
+  margin: 8px auto 0;
+  width: 24px;
+  height: 24px;
 }
 
-.side-collapse--at-left {
-  border-right: 1px solid var(--mj-border-subtle);
-}
-
-.side-collapse__arrow {
-  font-size: 0.7rem;
-  line-height: 1;
-}
-
-.side-collapse__label {
-  writing-mode: vertical-rl;
-  letter-spacing: 0.18em;
-  font-size: 0.64rem;
-  white-space: nowrap;
-}
-
-/* 折叠成竖条时开关占满整栏 */
-.main-screen__pane--collapsed .side-collapse {
-  flex: 1 1 auto;
-  justify-content: flex-start;
+/* 折叠态的待应用角标同样挂角，不挤占箭头 */
+.side-collapse-btn--collapsed .side-collapse__dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
 }
 
 /* 待应用角标：右栏折叠时也能看到有东西待处理 */
@@ -728,25 +733,3 @@
   flex-shrink: 0;
 }
 
-@media (max-width: 900px) {
-  .side-collapse {
-    flex: 0 0 auto;
-    width: 100%;
-    flex-direction: row;
-    justify-content: center;
-    gap: 6px;
-    padding: 8px 0;
-    border-top: 1px solid var(--mj-border-subtle);
-    border-left: none;
-    border-right: none;
-  }
-
-  .side-collapse__label {
-    writing-mode: horizontal-tb;
-    font-size: 0.72rem;
-  }
-
-  .main-screen__pane--collapsed .side-collapse {
-    flex: 1 1 auto;
-  }
-}

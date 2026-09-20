@@ -239,19 +239,19 @@ function startTestBattle() {
             :world-time-baseline="worldTimeBaseline"
             @update:world-time="worldTime = $event"
             @cultivate="onCultivate"
+            @collapse="toggleSidebar('left')"
           />
         </div>
+        <!-- 折叠后内容区整体隐藏，这里补一个正方形按钮用于展开 -->
         <button
+          v-if="sidebarCollapsed.left"
           type="button"
-          class="side-collapse side-collapse--at-right"
-          :aria-expanded="!sidebarCollapsed.left"
+          class="side-collapse-btn side-collapse-btn--collapsed"
+          :aria-expanded="false"
           aria-controls="pane-player"
-          :title="sidebarCollapsed.left ? '展开主角面板' : '折叠主角面板'"
+          title="展开主角面板"
           @click="toggleSidebar('left')"
-        >
-          <span class="side-collapse__arrow" aria-hidden="true">{{ sidebarCollapsed.left ? "»" : "«" }}</span>
-          <span class="side-collapse__label">主角面板</span>
-        </button>
+        >»</button>
       </aside>
       <main class="main-screen__pane main-screen__pane--chat" aria-label="中栏：剧情">
         <StoryChatPanel
@@ -274,17 +274,18 @@ function startTestBattle() {
         :class="{ 'main-screen__pane--collapsed': sidebarCollapsed.right }"
         aria-label="右栏：功能面板"
       >
+        <!-- 折叠后内容区整体隐藏，这里补一个正方形按钮用于展开 -->
         <button
+          v-if="sidebarCollapsed.right"
           type="button"
-          class="side-collapse side-collapse--at-left"
-          :aria-expanded="!sidebarCollapsed.right"
+          class="side-collapse-btn side-collapse-btn--collapsed"
+          :aria-expanded="false"
           aria-controls="pane-side"
-          :title="sidebarCollapsed.right ? '展开功能面板' : '折叠功能面板'"
+          title="展开功能面板"
           @click="toggleSidebar('right')"
         >
           <span v-if="sidebarPendingBadge > 0" class="side-collapse__dot" aria-hidden="true"></span>
-          <span class="side-collapse__arrow" aria-hidden="true">{{ sidebarCollapsed.right ? "«" : "»" }}</span>
-          <span class="side-collapse__label">功能面板</span>
+          «
         </button>
         <div id="pane-side" class="main-screen__pane-inner">
           <SideToolbarPanel
@@ -292,6 +293,7 @@ function startTestBattle() {
             :test-disabled="isBusy"
             @test-battle="startTestBattle"
             @load-save="(v) => emit('loadSave', v)"
+            @collapse="toggleSidebar('right')"
           />
         </div>
       </aside>

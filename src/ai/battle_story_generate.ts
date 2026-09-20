@@ -9,7 +9,8 @@
  */
 
 import { BATTLE_STORY_SYSTEM_PRESET } from "./battle_story_preset";
-import { formatStoryOutline } from "./story_preset";
+import { formatMainline } from "./story_preset";
+import { genderLine } from "./genderGuard";
 import { getWorldPreset } from "../role_core/worldSettingsStore";
 import {
   completeChatWithMessagesJson,
@@ -122,6 +123,7 @@ function buildBattleUserContent(input: BattleStoryInput): string {
   lines.push("");
   lines.push("【主角】");
   lines.push(`姓名：${p.displayName}`);
+  lines.push(genderLine(p.gender));
   lines.push(`境界：${p.realm.major}${p.realm.minor}`);
   lines.push(
     `当前血量：${p.currentHp}/${p.maxHp}，法力：${p.currentMp}/${p.maxMp}`,
@@ -163,7 +165,7 @@ export function buildBattleStoryRequestPayload(input: BattleStoryInput): JsonCha
   }
 
   const systemParts = [getWorldPreset().preset, BATTLE_STORY_SYSTEM_PRESET];
-  const outline = formatStoryOutline(getWorldPreset());
+  const outline = formatMainline(getWorldPreset());
   if (outline) systemParts.push(outline);
   if (storyParts.length > 0) {
     systemParts.push("【之前的剧情】\n" + storyParts.join("\n\n---\n\n"));

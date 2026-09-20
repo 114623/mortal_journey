@@ -60,6 +60,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   "update:worldTime": [value: WorldTime];
   "cultivate": [value: CultivationInput];
+  /** 折叠本侧栏（折叠开关由竖条改为日期条右侧的正方形按钮后转发）。 */
+  "collapse": [];
 }>();
 const worldTimeTitle = computed(() => formatWorldTimeZhDisplay(props.worldTime));
 
@@ -310,6 +312,7 @@ function onCultivateConfirm(payload: CultivationConfirmPayload) {
     currentMastery: mp.mastery,
     currentMasteryExp: mp.exp,
     masteryThreshold: mp.threshold,
+    maxLayer: mp.maxLayer,
     spiritStoneCount: payload.spiritStoneCount,
     estimatedMonths: payload.estimatedMonths,
   });
@@ -343,6 +346,13 @@ function onSlotKeydown(e: KeyboardEvent, fn: () => void) {
     />
     <header class="main-panel__meta-strip" aria-label="世界时间" :title="worldTimeTitle">
       <p class="main-panel__meta-strip-text">{{ worldTimeTitle }}</p>
+      <button
+        type="button"
+        class="side-collapse-btn"
+        title="折叠主角面板"
+        aria-label="折叠主角面板"
+        @click="emit('collapse')"
+      >«</button>
     </header>
     <div class="main-panel__body">
       <template v-if="!protagonist">
@@ -379,7 +389,7 @@ function onSlotKeydown(e: KeyboardEvent, fn: () => void) {
               <button
                 type="button"
                 class="mj-player-profile-btn"
-                title="编辑人物档案：性格 / 外貌 / 记忆"
+                title="编辑角色设定：性格 / 外貌 / 记忆"
                 @click.stop="openProfileModal"
               >📝</button>
             </div>

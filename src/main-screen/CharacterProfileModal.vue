@@ -353,7 +353,7 @@ onUnmounted(() => {
             <button type="button" class="mj-trait-modal-close" aria-label="关闭" @click="onCloseClick">
               ×
             </button>
-            <h4 class="mj-trait-modal-title">人物档案 · {{ character.displayName }}</h4>
+            <h4 class="mj-trait-modal-title">角色设定 · {{ character.displayName }}</h4>
             <div class="mj-trait-modal-rarity">{{ subtitle }}</div>
 
             <p v-if="busy" class="mj-profile-locked">

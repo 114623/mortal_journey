@@ -23,12 +23,15 @@ import type { WorldLocation } from "../role_core/types/worldLocation";
 import { formatWorldLocation } from "../role_core/types/worldLocation";
 import { Protagonist, protagonist } from "../role_core/Protagonist";
 import { npcStore } from "../role_core/npcStore";
+import { factionStore, type Faction } from "../role_core/factionStore";
+import { chapterStore, type Chapter } from "../role_core/chapterStore";
 import { worldMapStore } from "../role_core/worldMapStore";
 import { locationImageStore, type LocationImagesSerialData } from "../role_core/locationImageStore";
 import { storyStore, type StorySerialData } from "../role_core/storyStore";
 import { worldSettings, setWorldSettings, loadGlobalWorldSettings } from "../role_core/worldSettingsStore";
 import { serializePendingEdits, restorePendingEdits, clearAllPendingEdits } from "../role_core/pendingEdits";
-import { backfillGongfaTiers } from "../role_core/types/itemTier";
+import { backfillGongfaTiers, clampGongfaMasteryInHolder } from "../role_core/types/itemTier";
+import { resetSceneProgress } from "../role_core/sceneBudgetStore";
 import { gameLog } from "../log/gameLog";
 
 export const SAVE_VERSION = 1;
@@ -139,6 +142,10 @@ export interface MjSavePayload {
   worldSettings?: WorldSettingsText;
   /** 回合进行中保存、尚未生效的改动。旧存档缺省为空队列。 */
   pendingEdits?: PendingEditsSerial;
+  /** 已登记的势力档案。旧存档缺省为空表。 */
+  factions?: Faction[];
+  /** 当前篇章（玩家在世界设定里自己开）。旧存档缺省视为无篇章。 */
+  chapter?: Chapter | null;
 }
 
 export interface SaveIndexEntry {
@@ -268,6 +275,8 @@ export function serializeAll(now = Date.now()): MjSavePayload | null {
     story: storyStore.serializeStory(),
     worldSettings: { ...worldSettings.value },
     pendingEdits: serializePendingEdits(),
+    factions: factionStore.serializeFactions(),
+    chapter: chapterStore.serializeChapter(),
   };
 }
 
@@ -441,6 +450,15 @@ export function restoreSave(payload: MjSavePayload): void {
       `[GameSave] 功法阶层迁移：已为 ${migratedGongfa} 门无阶层的老功法补「与持有者同阶」`,
     );
   }
+  // 迁移：层数上限改为按阶层决定后，旧存档可能出现 mastery 超过新上限的功法，夹回满层。
+  const clampedGongfa =
+    clampGongfaMasteryInHolder(payload.protagonist) +
+    (payload.npcs ?? []).reduce((acc, n) => acc + clampGongfaMasteryInHolder(n), 0);
+  if (clampedGongfa > 0) {
+    gameLog.info(
+      `[GameSave] 功法层数迁移：已把 ${clampedGongfa} 门超过新上限的功法夹回满层`,
+    );
+  }
   if (payload.protagonist) {
     // loadFromJson 失败（role 非 protagonist / 结构损坏）时静默返回 false，
     // 主角会保持 null —— 主界面面板随之显示占位文案。这里必须落日志，否则无从排查。
@@ -458,6 +476,9 @@ export function restoreSave(payload: MjSavePayload): void {
     gameLog.warn(`[GameSave] 存档 ${activeSaveId} 无主角数据`);
   }
   npcStore.restoreNpcs(payload.npcs ?? []);
+  factionStore.restoreFactions(payload.factions ?? []);
+  // 篇章跨回合延续，必须随存档走（与场景进度不同，后者只在会话内）。
+  chapterStore.restoreChapter(payload.chapter);
   worldMapStore.restoreWorldMap(payload.worldMap ?? null);
   locationImageStore.restore(payload.locationImages ?? null);
   storyStore.restoreStory(payload.story ?? null);
@@ -466,6 +487,8 @@ export function restoreSave(payload: MjSavePayload): void {
   setWorldSettings(payload.worldSettings ?? readGlobalWorldSettings());
   restorePendingEdits(payload.pendingEdits);
   activeFateChoice = payload.fateChoice;
+  // 场景进度只在会话内维护：读档后旧的层/轮计数可能与新存档不符，直接清零。
+  resetSceneProgress();
 }
 
 /**
@@ -475,9 +498,12 @@ export function restoreSave(payload: MjSavePayload): void {
 export function resetAllGameState(): void {
   Protagonist.clear();
   npcStore.clearNpcs();
+  factionStore.clearFactions();
+  chapterStore.clearChapter();
   worldMapStore.clearWorldMap();
   locationImageStore.clearAll();
   storyStore.clearStory();
+  resetSceneProgress();
   // 注意：不是回到内置默认，而是载入玩家的全局设定副本——
   // 否则「开新人生」会把玩家在世界设定里改过的内容全部抹掉。
   loadGlobalWorldSettings();

@@ -8,8 +8,8 @@
  *   只作用于剧情 AI。
  * - **预设**（文风预设）：台词与去旁白散文化、角色防全知、轻小说文风。
  *   作用于剧情 AI / 开局剧情 AI / 修炼剧情 AI / 结局 AI。
- * - **剧情脉络**（2026-09 新增）：玩家希望剧情往哪个方向发展的提示，供剧情 AI 参考；
- *   可留空。作用于剧情 AI / 开局 / 修炼 / 结局四条叙事链路。
+ * - **主线**（原「剧情脉络」，2026-09 升级）：玩家设定的**长期方向**，是「篇章」的上位目标。
+ *   可留空。作用于剧情 AI / 开局 / 修炼 / 结局四条叙事链路 + 状态 AI（世界与人物的长期演化以它为默认倾向）。
  *
  * 输出契约（`<thinking>` + `<mj_story_body>` 标签结构）**不在此列**——
  * 它是解析层的硬要求，玩家改写会直接导致解析失败。
@@ -26,14 +26,14 @@ export interface WorldSettingsText {
   rules: string;
   /** 预设：文风与叙事口吻（剧情 AI 系列）。 */
   preset: string;
-  /** 剧情脉络：玩家希望的发展方向（叙事类 AI 参考用，可留空）。 */
+  /** 主线：玩家设定的长期方向（叙事类 AI + 状态 AI 参考用，可留空）。 */
   storyOutline: string;
 }
 
 /** 单段文本的安全上限（仅防极端输入撑爆上下文，正常编辑不会触及）。 */
 export const WORLD_SETTINGS_FIELD_MAX_LENGTH = 40000;
 
-/** 构造一份默认世界设定（取各 preset 的内置文本；剧情脉络默认为空）。 */
+/** 构造一份默认世界设定（取各 preset 的内置文本；主线默认为空）。 */
 export function createDefaultWorldSettings(): WorldSettingsText {
   return {
     worldView: WORLD_VIEW_DEFAULT,
@@ -60,7 +60,7 @@ export function normalizeWorldSettings(raw: unknown): WorldSettingsText {
     worldView: pick(o.worldView, def.worldView),
     rules: pick(o.rules, def.rules),
     preset: pick(o.preset, def.preset),
-    // 剧情脉络允许为空（玩家没写就不注入，省 token），因此单独处理、不走 pick 的回退逻辑。
+    // 主线允许为空（玩家没写就不注入，省 token），因此单独处理、不走 pick 的回退逻辑。
     storyOutline:
       typeof o.storyOutline === "string"
         ? o.storyOutline.slice(0, WORLD_SETTINGS_FIELD_MAX_LENGTH)

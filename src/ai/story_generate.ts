@@ -1,7 +1,10 @@
 import { composeStorySystemPreset } from "./story_preset";
+import { genderLine, genderRule } from "./genderGuard";
 import { getWorldPreset } from "../role_core/worldSettingsStore";
 import { completeChatWithMessagesJson, type JsonChatRequestPayload, type ChatMessage } from "./openAiChatBridge";
 import { Protagonist } from "../role_core/Protagonist";
+import { factionStore } from "../role_core/factionStore";
+import { buildChapterDirective } from "../role_core/chapterStore";
 import { describeNextBreakthrough } from "../role_core/realmUtils";
 import type { ProtagonistPlayInfo, NarrationPerson, EquippedSlotsState, GongfaSlotsState, InventoryStackItem } from "../role_core/types/playInfo";
 import { formatWorldLocationDash } from "../role_core/types/worldLocation";
@@ -25,6 +28,8 @@ export interface StoryGenerateInput {
   sceneNpcSnapshot?: string;
   /** 当前所在地点（让剧情 AI 感知场景）。 */
   currentWorldLocation?: string;
+  /** 场景配额硬约束（秘境层数 / 擂台轮次 / 连续战斗波次触顶时注入）。 */
+  sceneDirective?: string;
 }
 
 export interface StoryParsed {
@@ -143,11 +148,21 @@ function buildStoryUserContent(p: ProtagonistPlayInfo, sceneNpcSnapshot?: string
     ? `\n【主角画像 · 玩家设定，剧情须与之保持一致】\n${profileLines.join("\n")}\n`
     : "";
 
+  // 势力素材：已登记势力的诉求与关系是事件的第一生长点，
+  // 治「事件千篇一律」——让 AI 从已有势力的欲望里长事件，而不是每回合现编一个。
+  const factionSnapshot = factionStore.formatFactionSnapshot();
+  const factionBlock = factionSnapshot
+    ? `\n【势力素材 · 已登记势力，涉及势力的事件优先从这里生长】\n${factionSnapshot}\n` +
+      "要求：① 涉及势力的事件优先从上述势力的诉求与关系中长出；\n" +
+      "② 新势力登场须在正文内有可观察的出现方式（拜访、传闻、他人相告、正面冲突），不得凭空出现；\n" +
+      "③ 已知的势力名称、驻地、与主角关系不得与上述记录冲突。\n"
+    : "";
+
   return [
     "【主角摘要 · 请据此与历史剧情继续生成后续剧情】",
     "",
     `姓名：${p.displayName}`,
-    `性别：${p.gender || "—"}`,
+    genderLine(p.gender),
     narrationPersonLine(p.narrationPerson),
     `境界：${Protagonist.formatRealm(p.realm)}${p.realmComplete ? "·圆满" : ""}`,
     `修为状态：${p.realmComplete ? describeNextBreakthrough(p.realm.major, p.realm.minor) : "修为未圆满"}`,
@@ -171,6 +186,7 @@ function buildStoryUserContent(p: ProtagonistPlayInfo, sceneNpcSnapshot?: string
     "",
     "【储物袋】",
     formatInventorySlots(p.inventorySlots),
+    factionBlock,
     npcLine,
     "",
   ].join("\n");
@@ -195,12 +211,30 @@ export function buildStoryRequestPayload(input: StoryGenerateInput): JsonChatReq
   if (storyParts.length > 0) {
     systemParts.push("【之前的剧情】\n" + storyParts.join("\n\n---\n\n"));
   }
+  // 性别称呼硬约束放最后：最靠近生成位置，且显式声明优先于出身背景与历史剧情，
+  // 防止「旧记忆里写成儿子 → 新一轮沿用」的污染循环。
+  const genderHint = genderRule(input.protagonist.gender);
+  if (genderHint) systemParts.push(genderHint);
   messages.push({ role: "system", content: systemParts.join("\n\n") });
 
   messages.push({
     role: "user",
     content: buildStoryUserContent(input.protagonist, input.sceneNpcSnapshot, input.currentWorldLocation),
   });
+
+  // 场景配额硬约束：放在最后一条 user 消息里（最靠近生成位置，权重最高）。
+  // 未触顶时 buildSceneDirective() 返回空串，这里不会多注入任何东西。
+  const directive = input.sceneDirective?.trim() ?? "";
+  if (directive) {
+    messages.push({ role: "user", content: directive });
+  }
+
+  // 篇章指令：同样放在最后一条 user 消息（权重最高）。
+  // 玩家没开篇章时 buildChapterDirective() 返回空串——做到「不开就永不打扰」。
+  const chapterDirective = buildChapterDirective(ws.storyOutline).trim();
+  if (chapterDirective) {
+    messages.push({ role: "user", content: chapterDirective });
+  }
 
   if (lastUserContent != null) {
     messages.push({ role: "user", content: `[格式提醒：请严格将思考过程包裹在<thinking>...</thinking>标签内，正文包裹在 <mj_story_body>...</mj_story_body> 标签内。]\n\n${lastUserContent}` });

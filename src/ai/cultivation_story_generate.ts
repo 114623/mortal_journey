@@ -1,5 +1,6 @@
 import { CULTIVATION_STORY_SYSTEM_PRESET } from "./cultivation_story_preset";
-import { formatStoryOutline } from "./story_preset";
+import { formatMainline } from "./story_preset";
+import { genderLine } from "./genderGuard";
 import { getWorldPreset } from "../role_core/worldSettingsStore";
 import {
   completeChatWithMessagesJson,
@@ -26,6 +27,8 @@ export interface CultivationStoryInput {
   currentMastery: number;
   currentMasteryExp: number;
   masteryThreshold: number;
+  /** 该功法的层数上限（由阶层决定）。 */
+  maxLayer?: number;
   spiritStoneCount: number;
   estimatedMonths: number;
   protagonist: ProtagonistPlayInfo;
@@ -112,9 +115,10 @@ function buildCultivationUserContent(input: CultivationStoryInput): string {
     ? formatWorldLocationDash(input.currentWorldLocation)
     : "未知";
   const timePreview = buildTimePreview(input.estimatedMonths);
-  const masteryInfo = input.currentMastery >= 10
-    ? "已圆满（第10层/10层）"
-    : `第${input.currentMastery}层/10层，熟练度${input.currentMasteryExp}/${input.masteryThreshold}`;
+  const maxLayer = Math.max(1, Math.floor(input.maxLayer ?? 10));
+  const masteryInfo = input.currentMastery >= maxLayer
+    ? `已圆满（第${maxLayer}/${maxLayer}层）`
+    : `第${input.currentMastery}层/${maxLayer}层，修炼进度${input.currentMasteryExp}/${input.masteryThreshold}`;
 
   const npcSection = input.npcSnapshot?.trim()
     ? `\n【周围人物】\n${input.npcSnapshot.trim()}\n`
@@ -123,13 +127,13 @@ function buildCultivationUserContent(input: CultivationStoryInput): string {
   return [
     "【修炼参数】",
     `修炼功法：${input.gongfaName}（${input.gongfaGrade}，${input.gongfaSystem}）`,
-    `功法熟练度：${masteryInfo}`,
+    `功法修炼进度：${masteryInfo}`,
     `消耗灵石：${input.spiritStoneCount}枚`,
     `预计修炼时间：${timePreview}`,
     "",
     "【主角状态】",
     `姓名：${p.displayName}`,
-    `性别：${p.gender || "—"}`,
+    genderLine(p.gender),
     `境界：${p.realm.major}${p.realm.minor}${p.realmComplete ? "·圆满" : ""}`,
     `修为状态：${p.realmComplete ? "修为已圆满" : "修为未圆满"}`,
     `灵根：${(p as { linggen?: string[] }).linggen?.join("") || "无"}`,
@@ -163,8 +167,8 @@ export function buildCultivationStoryRequestPayload(input: CultivationStoryInput
   }
 
   const systemParts = [getWorldPreset().preset, CULTIVATION_STORY_SYSTEM_PRESET];
-  // 玩家写的剧情脉络（非空才注入），闭关期间也朝期望方向推进。
-  const outline = formatStoryOutline(getWorldPreset());
+  // 玩家写的主线（非空才注入），闭关期间也朝这条长期方向推进。
+  const outline = formatMainline(getWorldPreset());
   if (outline) systemParts.push(outline);
   if (storyParts.length > 0) {
     systemParts.push("【之前的剧情】\n" + storyParts.join("\n\n---\n\n"));

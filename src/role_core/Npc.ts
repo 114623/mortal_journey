@@ -21,7 +21,7 @@ import type { InventoryStackItem, TreasureItemDefinition, GongfaItemDefinition }
 import type { NpcNearbyEntry } from "../ai/state_generate";
 import { parseEquipObject, parseGongfaObject, parseStorageObject } from "../ai/parseAiItem";
 import { resolveNpcId } from "./npcId";
-import { tierIndex, isItemTier } from "./types/itemTier";
+import { tierIndex, isItemTier, ensureGongfaTierList } from "./types/itemTier";
 import { rerollTreasureModifiersKeepTypes } from "./types/treasure";
 import type { WorldLocation } from "./types/worldLocation";
 import type { WorldTime } from "./worldTime";
@@ -342,6 +342,8 @@ export class Npc extends Character {
       }
       // 重评估后境界可能提升，功法层数按新境界重新推算。
       applyNpcGongfaMasteryByRealm(newSlots, this.realm.major, this.realm.minor);
+      // 同上：NPC 功法栏是整体赋值，补一次阶层兜底。
+      ensureGongfaTierList(newSlots, this.realm.major);
       this.gongfaSlots = newSlots;
     }
 

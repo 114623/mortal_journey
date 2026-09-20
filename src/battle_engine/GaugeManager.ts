@@ -1,11 +1,12 @@
-import type { BattleCombatant, ModifierType } from "./types";
+import type { BattleCombatant } from "./types";
 import { GAUGE_MAX } from "./constants";
+import { effectiveSpeed } from "./formulas";
 
 export class GaugeManager {
 
+  /** 有效身法（与闪避判定同源，见 formulas.effectiveSpeed）。 */
   getEffectiveSpeed(combatant: BattleCombatant): number {
-    const speedMod = this.getModifierTotal(combatant, "speed");
-    return Math.max(1, Math.round(combatant.stats.speed * (1 + speedMod / 100)));
+    return effectiveSpeed(combatant);
   }
 
   advanceToNextActor(
@@ -58,11 +59,5 @@ export class GaugeManager {
 
   resetGauge(combatant: BattleCombatant): void {
     combatant.actionGauge = 0;
-  }
-
-  private getModifierTotal(combatant: BattleCombatant, type: ModifierType): number {
-    return combatant.effects
-      .filter(e => e.category === "modifier" && e.modifierType === type)
-      .reduce((sum, e) => sum + (e.modifierValue ?? 0) * e.stacks, 0);
   }
 }

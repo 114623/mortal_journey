@@ -178,6 +178,7 @@ export function useOpeningStoryFromFateChoice(
 
           if (stateResult.actionOptions) {
             storyStore.actionOptions.value = stateResult.actionOptions;
+            storyStore.noteBranchAxes(stateResult.actionOptions);
           }
 
           const current = protagonist.value;

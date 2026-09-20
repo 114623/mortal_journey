@@ -309,10 +309,10 @@ onUnmounted(() => {
                   <button
                     type="button"
                     class="main-screen__btn mj-npc-profile-btn"
-                    title="编辑人物档案：性格 / 外貌 / 记忆"
+                    title="编辑角色设定：性格 / 外貌 / 记忆"
                     @click="openProfileModal"
                   >
-                    📝 档案
+                    📝 角色设定
                   </button>
                 </div>
 

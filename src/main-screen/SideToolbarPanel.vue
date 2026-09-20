@@ -1,22 +1,22 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, shallowRef } from "vue";
 import type { WorldLocation } from "../role_core/types/worldLocation";
+import { npcStore } from "../role_core/npcStore";
+import type { Npc } from "../role_core/Npc";
 import WorldMapModal from "./WorldMapModal.vue";
 import AlchemyModal from "./AlchemyModal.vue";
 import CharacterArchiveModal from "./CharacterArchiveModal.vue";
+import NpcDetailModal from "./NpcDetailModal.vue";
+import NpcMiniCard from "./NpcMiniCard.vue";
 import WorldSettingsModal from "./WorldSettingsModal.vue";
 import ItemForgeModal from "./ItemForgeModal.vue";
+import FactionBoardModal from "./FactionBoardModal.vue";
 import SaveLoadModal from "./SaveLoadModal.vue";
 import SettingsModal from "./SettingsModal.vue";
 import type { MjSavePayload } from "../save/gameSave";
 import { writeActiveSave } from "../save/gameSave";
 import { gameLog } from "../log/gameLog";
 import { hasPendingWorldSettings, pendingProfileCount } from "../role_core/pendingEdits";
-import {
-  autoTurnSaveCount,
-  setAutoTurnSaveCount,
-  MAX_AUTO_TURN_SAVES,
-} from "../save/autoTurnSave";
 
 const props = defineProps<{
   currentLocation?: WorldLocation | null;
@@ -27,21 +27,43 @@ const emit = defineEmits<{
   testBattle: [];
   /** 请求读取另一个存档（转交 App 执行与标题界面一致的切换流程）。 */
   loadSave: [value: { id: string; payload: MjSavePayload }];
+  /** 折叠本侧栏（折叠开关从竖条改为内容区里的正方形按钮后，由本组件转发）。 */
+  collapse: [];
 }>();
 
 const mapModalOpen = ref(false);
 const alchemyModalOpen = ref(false);
 const archiveModalOpen = ref(false);
 const worldSettingsOpen = ref(false);
-/** 打开世界设定时默认落在哪个标签页；「剧情脉络」入口传 storyOutline。 */
+/** 打开世界设定时默认落在哪个标签页；「篇章」入口传 storyOutline（主线 · 篇章页）。 */
 const worldSettingsTab = ref<"worldView" | "rules" | "preset" | "storyOutline">("worldView");
 const forgeModalOpen = ref(false);
+const factionModalOpen = ref(false);
 const saveLoadOpen = ref(false);
 const settingsOpen = ref(false);
 
 /** 各类待回合结束才生效的改动条数（显示在对应按钮上）。 */
 const queuedProfiles = computed(() => pendingProfileCount.value);
 const queuedWorld = computed(() => (hasPendingWorldSettings.value ? 1 : 0));
+
+// ── 侧栏「在场人物」卡（与世界地图同款）────────────────────────────────────
+const npcDetailOpen = ref(false);
+const npcDetailTarget = shallowRef<Npc | null>(null);
+
+/** 当前地点的在场 NPC，按最近出场排序。 */
+const presentNpcs = computed<Npc[]>(() =>
+  npcStore.sortByRecent(npcStore.getActiveNpcsAt(props.currentLocation)),
+);
+
+function openNpcDetail(npc: Npc): void {
+  npcDetailTarget.value = npc;
+  npcDetailOpen.value = true;
+}
+
+function closeNpcDetail(): void {
+  npcDetailOpen.value = false;
+  npcDetailTarget.value = null;
+}
 
 function openMapModal() {
   mapModalOpen.value = true;
@@ -76,16 +98,6 @@ function closeAlchemyModal() {
   alchemyModalOpen.value = false;
 }
 
-/** 回合自动存档保留数量（0 = 关闭）；写入时夹取到 [0, MAX]。 */
-const autoTurnCount = computed<number>({
-  get: () => autoTurnSaveCount.value,
-  set: (v) => setAutoTurnSaveCount(v),
-});
-
-function stepAutoTurn(delta: number): void {
-  setAutoTurnSaveCount(autoTurnSaveCount.value + delta);
-}
-
 function openForgeModal() {
   forgeModalOpen.value = true;
 }
@@ -94,7 +106,20 @@ function closeForgeModal() {
   forgeModalOpen.value = false;
 }
 
-function openSaveLoadModal() {
+function openFactionModal() {
+  factionModalOpen.value = true;
+}
+
+function closeFactionModal() {
+  factionModalOpen.value = false;
+}
+
+/**
+ * 打开「读取人生 / 切换存档」：入口在设置弹窗的「回合自动存档」分组里，
+ * 这里只负责把信号转成弹窗开关（弹窗本体挂在本组件，切换流程仍需 emit 给 App）。
+ */
+function openSaveLoadModal(): void {
+  settingsOpen.value = false;
   saveLoadOpen.value = true;
 }
 
@@ -125,52 +150,45 @@ function onLoadSave(value: { id: string; payload: MjSavePayload }): void {
 <template>
   <section class="main-panel main-panel--side" aria-label="功能面板">
     <div class="main-panel__body">
+      <!-- 在场人物（置顶，无标题无外框）：不必打开「角色」就能看到身边有谁 -->
+      <div class="side-present" aria-label="在场人物">
+        <div class="side-present__toolbar">
+          <button
+            type="button"
+            class="side-collapse-btn"
+            title="折叠功能面板"
+            aria-label="折叠功能面板"
+            @click="emit('collapse')"
+          >
+            <span v-if="queuedProfiles + queuedWorld > 0" class="side-collapse__dot" aria-hidden="true"></span>
+            »
+          </button>
+        </div>
+        <div v-if="presentNpcs.length === 0" class="side-present__empty">当前地点没有其他人</div>
+        <div v-else class="side-present__list">
+          <NpcMiniCard
+            v-for="npc in presentNpcs"
+            :key="npc.id || npc.displayName"
+            :npc="npc"
+            @click="openNpcDetail(npc)"
+          />
+        </div>
+      </div>
+
       <div class="side-btn-group">
         <button type="button" class="main-screen__btn side-btn" @click="openMapModal">世界地图</button>
         <button type="button" class="main-screen__btn side-btn" @click="openArchiveModal">
-          人物档案<span v-if="queuedProfiles > 0" class="side-btn__badge">{{ queuedProfiles }}</span>
+          角色<span v-if="queuedProfiles > 0" class="side-btn__badge">{{ queuedProfiles }}</span>
         </button>
         <button type="button" class="main-screen__btn side-btn" @click="openWorldSettings('storyOutline')">
-          剧情脉络<span v-if="queuedWorld > 0" class="side-btn__badge">{{ queuedWorld }}</span>
+          篇章<span v-if="queuedWorld > 0" class="side-btn__badge">{{ queuedWorld }}</span>
         </button>
         <button type="button" class="main-screen__btn side-btn" @click="openWorldSettings()">世界设定<span v-if="queuedWorld > 0" class="side-btn__badge">{{ queuedWorld }}</span></button>
         <button type="button" class="main-screen__btn side-btn" @click="openForgeModal">天道编辑</button>
+        <button type="button" class="main-screen__btn side-btn" @click="openFactionModal">势力</button>
         <button type="button" class="main-screen__btn side-btn" @click="openAlchemyModal">炼丹</button>
         <button type="button" class="main-screen__btn side-btn" @click="emit('testBattle')" :disabled="props.testDisabled">战斗测试</button>
         <button type="button" class="main-screen__btn side-btn" @click="openSettingsModal">设置</button>
-      </div>
-
-      <div class="side-autosave">
-        <span class="side-autosave__title">自动存档</span>
-        <div class="side-autosave__row">
-          <button
-            type="button"
-            class="side-autosave__step"
-            title="减少"
-            :disabled="autoTurnCount <= 0"
-            @click="stepAutoTurn(-1)"
-          >−</button>
-          <input
-            v-model.number="autoTurnCount"
-            class="side-autosave__input"
-            type="number"
-            min="0"
-            :max="MAX_AUTO_TURN_SAVES"
-            aria-label="自动存档保留回合数"
-          />
-          <button
-            type="button"
-            class="side-autosave__step"
-            title="增加"
-            :disabled="autoTurnCount >= MAX_AUTO_TURN_SAVES"
-            @click="stepAutoTurn(1)"
-          >＋</button>
-          <span class="side-autosave__unit">回合</span>
-        </div>
-        <p class="side-autosave__hint">
-          每回合开始时另存一份快照，滚动保留最近 {{ autoTurnCount }} 个回合（0 = 关闭）。
-        </p>
-        <button type="button" class="side-autosave__load" @click="openSaveLoadModal">读取人生</button>
       </div>
     </div>
     <WorldMapModal
@@ -195,14 +213,24 @@ function onLoadSave(value: { id: string; payload: MjSavePayload }): void {
       :open="forgeModalOpen"
       @close="closeForgeModal"
     />
+    <FactionBoardModal
+      :open="factionModalOpen"
+      @close="closeFactionModal"
+    />
     <SaveLoadModal
       :open="saveLoadOpen"
       @close="closeSaveLoadModal"
       @load="onLoadSave"
     />
+    <NpcDetailModal
+      :open="npcDetailOpen"
+      :npc="npcDetailTarget"
+      @close="closeNpcDetail"
+    />
     <SettingsModal
       :open="settingsOpen"
       @close="closeSettingsModal"
+      @open-saves="openSaveLoadModal"
     />
   </section>
 </template>
@@ -232,93 +260,79 @@ function onLoadSave(value: { id: string; payload: MjSavePayload }): void {
   vertical-align: 1px;
 }
 
-/* 自动存档保留回合数 */
-.side-autosave {
-  margin-top: 10px;
-  padding: 8px 8px 6px;
-  border: 1px solid var(--mj-border, rgba(140, 120, 83, 0.45));
-  border-radius: 4px;
-  background: rgba(0, 0, 0, 0.22);
+/* 在场人物（置顶）：无外框、无标题，卡片尽可能大 */
+.side-present {
+  padding: 6px 6px 2px;
 }
 
-.side-autosave__title {
-  display: block;
-  font-size: 0.72rem;
-  letter-spacing: 0.1em;
-  color: #8d7a5f;
-  margin-bottom: 6px;
-}
-
-.side-autosave__row {
+.side-present__toolbar {
   display: flex;
   align-items: center;
-  gap: 5px;
+  justify-content: flex-start;
+  margin-bottom: 4px;
 }
 
-.side-autosave__step {
-  width: 22px;
-  height: 22px;
-  line-height: 1;
+/* 待应用角标挂在折叠按钮角上，不占按钮内部空间 */
+.side-present__toolbar .side-collapse-btn {
+  position: relative;
+}
+
+.side-present__toolbar .side-collapse__dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+}
+
+.side-present__empty {
+  font-size: 0.7rem;
+  color: rgba(255, 255, 255, 0.35);
+  padding: 6px 2px;
+}
+
+.side-present__list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: min(46vh, 420px);
+  overflow-y: auto;
+}
+
+/* 卡片放大：头像由 46px 提到 88px；代价是压缩信息区，见下方血条。
+   注意 mini 卡本体已去 padding，这里不要再叠 padding，否则头像贴不到边。 */
+.side-present__list :deep(.npc-mini-avatar) {
+  width: 88px;
+  min-height: 84px;
+}
+
+.side-present__list :deep(.npc-mini-info) {
+  padding: 7px 9px;
+}
+
+.side-present__list :deep(.npc-mini-avatar-placeholder) {
+  font-size: 1.5rem;
+}
+
+/* 去掉 HP/MP 文字标签 + 血条缩短压矮，把横向空间让给头像 */
+.side-present__list :deep(.npc-mini-bars) {
+  max-width: 92px;
+  gap: 3px;
+}
+
+.side-present__list :deep(.npc-mini-bar-label) {
+  display: none;
+}
+
+.side-present__list :deep(.npc-mini-bar) {
+  height: 6px;
+}
+
+.side-present__list :deep(.npc-mini-name) {
   font-size: 0.9rem;
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid var(--mj-border, rgba(140, 120, 83, 0.45));
-  border-radius: 3px;
-  color: #c3ab88;
-  cursor: pointer;
-  font-family: inherit;
-}
-.side-autosave__step:hover:not(:disabled) {
-  border-color: var(--mj-gold, #e8c547);
-  color: #f0d9b8;
-}
-.side-autosave__step:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
 }
 
-.side-autosave__input {
-  width: 46px;
-  padding: 3px 4px;
-  text-align: center;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid var(--mj-border, rgba(140, 120, 83, 0.45));
-  border-radius: 3px;
-  color: #f0d9b8;
-  font-size: 0.78rem;
-  font-family: inherit;
-}
-.side-autosave__input:focus {
-  outline: none;
-  border-color: var(--mj-gold, #e8c547);
-}
-
-.side-autosave__unit {
+.side-present__list :deep(.npc-mini-realm),
+.side-present__list :deep(.npc-mini-identity) {
   font-size: 0.72rem;
-  color: #8d7a5f;
 }
 
-.side-autosave__hint {
-  margin: 6px 0 0;
-  font-size: 0.66rem;
-  line-height: 1.5;
-  color: #8d7a5f;
-}
-
-/* 读取人生：与自动存档同组，放在其下方 */
-.side-autosave__load {
-  width: 100%;
-  margin-top: 8px;
-  padding: 5px 8px;
-  font-size: 0.74rem;
-  font-family: inherit;
-  color: #c3ab88;
-  background: rgba(0, 0, 0, 0.32);
-  border: 1px solid var(--mj-border, rgba(140, 120, 83, 0.45));
-  border-radius: 3px;
-  cursor: pointer;
-}
-.side-autosave__load:hover {
-  border-color: var(--mj-gold, #e8c547);
-  color: #f0d9b8;
-}
 </style>

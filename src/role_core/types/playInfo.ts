@@ -35,6 +35,8 @@ import {
   GONGFA_MASTERY_THRESHOLDS,
   GONGFA_MASTERY_ATTRI_MULT,
   GONGFA_MASTERY_COMBAT_MULT,
+  GONGFA_COMBAT_MULT_CAP,
+  buildGongfaMasteryThresholds,
 } from "./gameConstants";
 
 export {
@@ -56,6 +58,8 @@ export {
   GONGFA_MASTERY_THRESHOLDS,
   GONGFA_MASTERY_ATTRI_MULT,
   GONGFA_MASTERY_COMBAT_MULT,
+  GONGFA_COMBAT_MULT_CAP,
+  buildGongfaMasteryThresholds,
 };
 // 一、数据 — 属性键与映射
 // ═══════════════════════════════════════════════════════════════════════════

@@ -27,10 +27,18 @@ import {
 } from "../role_core/pendingEdits";
 import { writeActiveSave } from "../save/gameSave";
 import { useScrollLock } from "../composables/useScrollLock";
+import {
+  chapter,
+  chapterTurnLimit,
+  openChapter,
+  updateChapter,
+  closeChapter,
+  clearChapter,
+} from "../role_core/chapterStore";
 
 const props = defineProps<{
   open: boolean;
-  /** 打开时默认落在哪个标签页（侧边栏「剧情脉络」入口传 storyOutline）。 */
+  /** 打开时默认落在哪个标签页（侧边栏「篇章」入口传 storyOutline，即「主线 · 篇章」页）。 */
   initialTab?: TabKey;
 }>();
 
@@ -63,8 +71,8 @@ const TABS: Array<{ key: TabKey; label: string; hint: string }> = [
   },
   {
     key: "storyOutline",
-    label: "剧情脉络",
-    hint: "在这里写下你希望的剧情发展方向供ai参考。可留空；非空时注入剧情 / 开局 / 修炼 / 结局 AI。",
+    label: "主线 · 篇章",
+    hint: "上半部＝主线（你设定的长期方向，注入剧情 / 开局 / 修炼 / 结局 AI 与状态 AI）；下半部＝当前篇章（主线之下一个具体的短期目标，只作用于剧情 AI 与状态 AI）。都不填则完全不干扰 AI。",
   },
 ];
 
@@ -104,6 +112,7 @@ const savedHint = ref("");
 function syncDraft(): void {
   draft.value = { ...(getPendingWorldSettings() ?? worldSettings.value) };
   savedHint.value = "";
+  syncChapterDraft();
 }
 
 watch(
@@ -159,6 +168,92 @@ function onDiscardPending(): void {
   syncDraft();
   savedHint.value = "已撤销待应用的改动。";
 }
+
+/* ---------- 篇章 ---------- */
+
+/** 篇章编辑草稿（标题/目标）。 */
+const chapterTitle = ref("");
+const chapterGoal = ref("");
+/** 篇章区的操作反馈。 */
+const chapterHint = ref("");
+/** 「清除篇章」的两击确认：第一击进入待确认，第二击才真删。 */
+const clearArmed = ref(false);
+
+/** 当前是否有进行中的篇章。 */
+const hasChapter = computed(() => !!chapter.value);
+const isChapterActive = computed(() => chapter.value?.status === "active");
+
+/** 把篇章草稿同步为当前篇章（无篇章时置空）。 */
+function syncChapterDraft(): void {
+  const cur = chapter.value;
+  chapterTitle.value = cur?.title ?? "";
+  chapterGoal.value = cur?.goal ?? "";
+  clearArmed.value = false;
+}
+
+/** 篇章改动即时生效后落盘；回合进行中不写盘（回合结束会自动存）。 */
+function commitChapter(msg: string): void {
+  chapterHint.value = msg;
+  if (busy.value) return;
+  try {
+    writeActiveSave();
+  } catch {
+    /* 写盘失败不阻断操作，回合结束还会再存一次 */
+  }
+}
+
+function onOpenChapter(): void {
+  if (!chapterTitle.value.trim()) {
+    chapterHint.value = "篇章名不能为空。";
+    return;
+  }
+  openChapter(chapterTitle.value, chapterGoal.value);
+  syncChapterDraft();
+  commitChapter(isChapterActive.value ? "已开启篇章，下一回合起注入 AI。" : "篇章已开启但状态异常，请重开。");
+}
+
+function onSaveChapter(): void {
+  if (!chapter.value) return;
+  updateChapter({ title: chapterTitle.value, goal: chapterGoal.value });
+  syncChapterDraft();
+  commitChapter("已更新篇章。");
+}
+
+function onCloseChapter(): void {
+  if (!chapter.value) return;
+  // 先把输入框里没点「保存修改」的改动落下去，再收束——否则玩家改完直接点收束会白改。
+  updateChapter({ title: chapterTitle.value, goal: chapterGoal.value });
+  closeChapter();
+  syncChapterDraft();
+  commitChapter("已收束。收束不等于成功，可在下方改个名字重新开启新篇章。");
+}
+
+/** 两击确认：第一击只是「上膛」。 */
+function onClearChapter(): void {
+  if (!clearArmed.value) {
+    clearArmed.value = true;
+    chapterHint.value = "再点一次「确认清除」即可彻底删除当前篇章。";
+    return;
+  }
+  clearChapter();
+  syncChapterDraft();
+  chapterHint.value = "已清除篇章，AI 不再收到任何篇章指令。";
+  if (!busy.value) {
+    try {
+      writeActiveSave();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/** 切标签页时取消「上膛」，避免误删。 */
+watch(activeTab, () => {
+  clearArmed.value = false;
+});
+
+/** 篇章被外部改动（如读档）时同步编辑区。 */
+watch(chapter, syncChapterDraft);
 
 function onCloseClick(): void {
   emit("close");
@@ -245,6 +340,74 @@ onUnmounted(() => {
               :placeholder="activeTab === 'storyOutline' ? OUTLINE_PLACEHOLDER : ''"
               spellcheck="false"
             />
+
+            <!-- 篇章：只在「主线 · 篇章」页出现；不开篇章时 AI 完全收不到篇章指令 -->
+            <section v-if="activeTab === 'storyOutline'" class="mj-worldset-chapter">
+              <div class="mj-worldset-chapter-head">
+                <span class="mj-worldset-chapter-title">当前篇章</span>
+                <span
+                  class="mj-worldset-chapter-state"
+                  :class="{ 'is-active': isChapterActive }"
+                >{{ !hasChapter ? '未开启' : (isChapterActive ? '进行中' : '已收束') }}</span>
+                <span v-if="hasChapter" class="mj-worldset-chapter-turns">
+                  已进行 {{ chapter?.turns ?? 0 }} / 上限 {{ chapterTurnLimit }} 回合
+                </span>
+              </div>
+
+              <input
+                v-model="chapterTitle"
+                class="mj-worldset-chapter-input"
+                placeholder="篇章名，如：查明血色禁地失踪的弟子"
+                spellcheck="false"
+              />
+              <input
+                v-model="chapterGoal"
+                class="mj-worldset-chapter-input"
+                placeholder="目标，如：拿到禁地第三层的令牌，且不被宗门发现"
+                spellcheck="false"
+              />
+
+              <div class="mj-worldset-chapter-actions">
+                <button
+                  v-if="!hasChapter"
+                  type="button"
+                  class="mj-item-detail-action-btn mj-item-detail-action-btn--primary"
+                  @click="onOpenChapter"
+                >开启篇章</button>
+                <template v-else>
+                  <button
+                    v-if="isChapterActive"
+                    type="button"
+                    class="mj-item-detail-action-btn"
+                    @click="onSaveChapter"
+                  >保存修改</button>
+                  <button
+                    v-if="isChapterActive"
+                    type="button"
+                    class="mj-item-detail-action-btn"
+                    @click="onCloseChapter"
+                  >收束篇章</button>
+                  <button
+                    v-else
+                    type="button"
+                    class="mj-item-detail-action-btn mj-item-detail-action-btn--primary"
+                    @click="onOpenChapter"
+                  >重新开启（回合数归零）</button>
+                  <button
+                    type="button"
+                    class="mj-item-detail-action-btn"
+                    :class="{ 'mj-worldset-chapter-danger': clearArmed }"
+                    @click="onClearChapter"
+                  >{{ clearArmed ? '确认清除' : '清除篇章' }}</button>
+                </template>
+              </div>
+
+              <p v-if="chapterHint" class="mj-worldset-chapter-hint">{{ chapterHint }}</p>
+              <p class="mj-worldset-chapter-note">
+                不开启篇章时，AI 完全不会看到任何篇章字样；开启后每回合以「推进 / 受阻 / 铺垫 / 背景压力」
+                四种方式之一服务它，但<b>玩家输入始终优先</b>，绝不硬拽回篇章。
+              </p>
+            </section>
 
             <div class="mj-worldset-meta">
               {{ activeText.length }} 字
@@ -374,9 +537,102 @@ onUnmounted(() => {
   resize: none;
 }
 
-/* 剧情脉络通常是几句话，不必占满整屏高度 */
+/* 主线通常只有几句话：定高，把剩余空间让给下方的篇章区 */
 .mj-worldset-input--short {
-  min-height: 160px;
+  flex: none;
+  height: 150px;
+  min-height: 150px;
+}
+
+/* 篇章编辑区：占据主线文本框以下的剩余高度，内容多时自身滚动 */
+.mj-worldset-chapter {
+  flex: 1;
+  min-height: 0;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--mj-border, rgba(140, 120, 83, 0.45));
+  overflow-y: auto;
+}
+
+.mj-worldset-chapter-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.mj-worldset-chapter-title {
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  color: #d8cbaf;
+}
+
+.mj-worldset-chapter-state {
+  padding: 1px 7px;
+  border: 1px solid var(--mj-border, rgba(140, 120, 83, 0.45));
+  border-radius: 8px;
+  font-size: 0.66rem;
+  color: var(--mj-muted, #8a9088);
+}
+
+.mj-worldset-chapter-state.is-active {
+  color: var(--mj-gold, #e8c547);
+  border-color: var(--mj-gold-dim, #b89a4a);
+}
+
+.mj-worldset-chapter-turns {
+  margin-left: auto;
+  font-size: 0.66rem;
+  color: var(--mj-muted, #8a9088);
+}
+
+.mj-worldset-chapter-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--mj-border, rgba(140, 120, 83, 0.45));
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--mj-text, #e8e4dc);
+  font-size: 0.74rem;
+  line-height: 1.5;
+  font-family: inherit;
+}
+
+.mj-worldset-chapter-input:focus {
+  outline: none;
+  border-color: var(--mj-gold-dim, #b89a4a);
+}
+
+.mj-worldset-chapter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.mj-worldset-chapter-danger {
+  color: #e88b7d;
+  border-color: rgba(232, 139, 125, 0.5);
+}
+
+.mj-worldset-chapter-hint {
+  margin: 8px 0 0;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: #9fd6a8;
+}
+
+.mj-worldset-chapter-note {
+  margin: 8px 0 0;
+  font-size: 0.66rem;
+  line-height: 1.55;
+  color: var(--mj-muted, #8a9088);
+}
+
+.mj-worldset-chapter-note b {
+  color: #c3ab88;
 }
 
 .mj-worldset-input:focus {

@@ -8,7 +8,11 @@ import {
   getCultivationRequired,
   EQUIP_SLOT_COUNT,
 } from "../role_core/types/playInfo";
-import { getGongfaMasteryThreshold } from "../role_core/realmUtils";
+import {
+  getGongfaMasteryThreshold,
+  gongfaMaxLayerOf,
+  clampGongfaMastery,
+} from "../role_core/realmUtils";
 import type {
   EquipSlotKey,
   InventoryStackItem,
@@ -319,12 +323,13 @@ export function traitSlotInnerText(t: TraitEntry | null): string {
 
 export function gongfaMasteryLabel(cell: GongfaItemDefinition | null): string {
   if (!cell) return "";
-  const mastery = cell.mastery ?? 1;
-  return `${mastery}/10`;
+  const max = gongfaMaxLayerOf(cell);
+  return `${clampGongfaMastery(cell.mastery ?? 1, max)}/${max}`;
 }
 
 export interface GongfaMasteryProgress {
   mastery: number;
+  maxLayer: number;
   exp: number;
   threshold: number;
   percent: number;
@@ -332,19 +337,26 @@ export interface GongfaMasteryProgress {
 }
 
 export function getGongfaMasteryProgress(cell: GongfaItemDefinition | null): GongfaMasteryProgress {
-  if (!cell) return { mastery: 1, exp: 0, threshold: 100, percent: 0, isMax: false };
-  const mastery = cell.mastery ?? 1;
+  if (!cell) return { mastery: 1, maxLayer: 10, exp: 0, threshold: 100, percent: 0, isMax: false };
+  const maxLayer = gongfaMaxLayerOf(cell);
+  const mastery = clampGongfaMastery(cell.mastery ?? 1, maxLayer);
   const exp = cell.masteryExp ?? 0;
-  if (mastery >= 10) return { mastery: 10, exp: 0, threshold: 0, percent: 100, isMax: true };
-  const threshold = getGongfaMasteryThreshold(mastery);
-  const percent = Math.min(100, Math.round(exp / threshold * 100));
-  return { mastery, exp, threshold, percent, isMax: false };
+  if (mastery >= maxLayer) {
+    return { mastery: maxLayer, maxLayer, exp: 0, threshold: 0, percent: 100, isMax: true };
+  }
+  const threshold = getGongfaMasteryThreshold(mastery, maxLayer);
+  const percent = Number.isFinite(threshold) && threshold > 0
+    ? Math.min(100, Math.round(exp / threshold * 100))
+    : 0;
+  return { mastery, maxLayer, exp, threshold, percent, isMax: false };
 }
 
 export function gongfaMasteryThresholdText(cell: GongfaItemDefinition): string {
-  const mastery = cell.mastery ?? 1;
-  if (mastery >= 10) return "—";
-  return String(getGongfaMasteryThreshold(mastery));
+  const maxLayer = gongfaMaxLayerOf(cell);
+  const mastery = clampGongfaMastery(cell.mastery ?? 1, maxLayer);
+  if (mastery >= maxLayer) return "—";
+  const th = getGongfaMasteryThreshold(mastery, maxLayer);
+  return Number.isFinite(th) ? String(th) : "—";
 }
 
 export type ShouyuanWarningLevel = "danger" | "warning" | "normal";

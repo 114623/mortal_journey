@@ -191,10 +191,10 @@ onUnmounted(() => {
 
             <div class="mj-trait-modal-body">
               <div class="mj-trait-modal-section">
-                <span class="mj-trait-modal-k">当前熟练度</span>
+                <span class="mj-trait-modal-k">当前修炼进度</span>
                 <div class="mj-trait-modal-v">
                   <div class="mj-mastery-row">
-                    <span class="mj-mastery-layer">第{{ masteryProgress.mastery }}/10层</span>
+                    <span class="mj-mastery-layer">第{{ masteryProgress.mastery }}/{{ masteryProgress.maxLayer }}层</span>
                     <span class="mj-mastery-exp">{{ masteryProgress.exp }}/{{ masteryProgress.threshold }}</span>
                   </div>
                   <div class="mj-mastery-progress">
@@ -233,7 +233,7 @@ onUnmounted(() => {
                 <div class="mj-trait-modal-v">
                   <div class="mj-cultivate-preview">
                     <div>{{ timePreview }}</div>
-                    <div>获得熟练度：+{{ totalExp }}</div>
+                    <div>获得修炼进度：+{{ totalExp }}</div>
                     <div class="mj-cultivate-preview-progress">
                       <span>修炼后：{{ resultExp }}/{{ masteryProgress.threshold }}</span>
                       <span>{{ resultPercent }}%</span>
