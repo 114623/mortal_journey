@@ -33,7 +33,6 @@ import {
   tierLabel,
   isItemTier,
   describeTierSuppression,
-  describeGongfaCultivation,
   tierIndex,
 } from "../role_core/types/itemTier";
 import type { ItemTier } from "../role_core/types/itemTier";
@@ -752,13 +751,8 @@ function findGongfaByName(name: string): GongfaItemDefinition | null {
 const tierHint = computed(() => {
   const d = draft.value;
   if (!d) return "";
-  const base = describeTierSuppression(d.tier, realmMajor.value);
-  // 功法额外一条：阶层低于持有者境界后，修炼它不再产出修为。
-  if (selectedType.value === "功法") {
-    const cult = describeGongfaCultivation(d.tier, realmMajor.value);
-    return cult ? `${base}；${cult}` : base;
-  }
-  return base;
+  // 功法与法宝一视同仁：阶层只影响跨阶压制系数（2026-09-21 起不再卡修为）。
+  return describeTierSuppression(d.tier, realmMajor.value);
 });
 
 const elixirTierHint = computed(() => {

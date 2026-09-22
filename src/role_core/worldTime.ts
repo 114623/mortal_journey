@@ -63,6 +63,16 @@ export function formatWorldTimeZhDisplay(t: WorldTime): string {
 }
 
 /**
+ * 例：`0005年12月20日 17:00`——带「时」的精确写法，供 NPC 记忆日志的时间行使用。
+ *
+ * 世界时间的最小粒度是**小时**（`WorldTime` 没有分钟字段），分钟位恒写 `00`，
+ * 免得 AI 凭空编出 17:40 这种无法与游戏时间对齐的时刻。
+ */
+export function formatWorldTimeZhPrecise(t: WorldTime): string {
+  return `${pad4(t.year)}年${pad2(t.month)}月${pad2(t.day)}日 ${pad2(t.hour)}:00`;
+}
+
+/**
  * 自 `from` 到 `to` 经过的整年数（仅比较年分量；后续若需精确到月日可在此扩展）。
  * 用于：显示年龄 = 开局档案年龄 + 经过年数。
  */

@@ -103,7 +103,8 @@ const dirty = computed(() => {
       b.shouyuan !== bb.shouyuan ||
       b.realmMajor !== bb.realmMajor ||
       b.realmMinor !== bb.realmMinor ||
-      b.linggen.join("") !== bb.linggen.join(""));
+      b.linggen.join("") !== bb.linggen.join("") ||
+      b.identity !== bb.identity);
   return (
     basicsDirty ||
     personality.value !== baseline.value.personality ||
@@ -206,7 +207,8 @@ function onSave(): void {
       b.shouyuan !== appliedB.shouyuan ||
       b.realmMajor !== appliedB.realmMajor ||
       b.realmMinor !== appliedB.realmMinor ||
-      b.linggen.join("") !== appliedB.linggen.join("");
+      b.linggen.join("") !== appliedB.linggen.join("") ||
+      b.identity !== appliedB.identity;
     const bDraft: NpcBasicsDraft = { ...b, linggen: [...b.linggen] };
     if (busy.value) {
       if (basicsChanged) setPendingNpcBasics(pendingKey.value, bDraft);
@@ -224,7 +226,10 @@ function onSave(): void {
     appearance.value !== applied.appearance ||
     memory.value !== applied.memory;
 
-  const wantAi = !changed && aiMaintained.value;
+  // ── 是否交给 AI 维护 ──
+  // 只认玩家手里那个勾选框：改过文字**不再**顺带把画像锁成 manual（旧行为会让玩家一改档案，
+  // AI 就永久停更，等于变相惩罚手动编辑）。想锁定请自己取消勾选。
+  const wantAi = aiMaintained.value;
   const draft = {
     personality: personality.value,
     appearance: appearance.value,
@@ -236,17 +241,22 @@ function onSave(): void {
 
   if (busy.value) {
     // 回合进行中：进队列，回合结束后应用。
-    if (changed || !wantAi) setPendingProfile(pendingKey.value, draft);
+    // 队列里已有草稿时也要重写一次——否则「打开勾选框」这类只改 source 的保存会被丢掉。
+    if (changed || !wantAi || hasPending.value) setPendingProfile(pendingKey.value, draft);
     if (basicsChanged) persist(c);
-    savedHint.value = "已排队，本回合结束后应用（会覆盖本回合 AI 的画像更新）。";
+    savedHint.value = wantAi
+      ? "已排队，本回合结束后应用（AI 仍会在后续回合继续更新此画像）。"
+      : "已排队，本回合结束后应用（已锁定为玩家设定，AI 不再覆写）。";
   } else {
     applyProfileDraft(c, draft);
     clearPendingProfile(pendingKey.value);
     persist(c);
-    savedHint.value = basicsChanged
+    savedHint.value = basicsChanged && !changed
       ? "已保存。"
       : changed
-        ? "已保存，并锁定为玩家设定（AI 不再覆写）。"
+        ? (wantAi
+          ? "已保存；AI 仍会在后续回合继续更新此画像。"
+          : "已保存，并锁定为玩家设定（AI 不再覆写）。")
         : wantAi
           ? "已交还 AI 维护，后续回合会由 AI 更新。"
           : "已锁定为玩家设定。";
@@ -373,6 +383,17 @@ onUnmounted(() => {
                   <input v-model="basics.displayName" class="mj-profile-input mj-profile-input--short" type="text" />
                 </div>
 
+                <!-- 名字下面那行简介（显示为「身份 · 境界」）的可编辑部分 -->
+                <div class="mj-profile-row">
+                  <label class="mj-profile-row-k" title="角色卡与信息界面里名字下面那行简介">简介</label>
+                  <input
+                    v-model="basics.identity"
+                    class="mj-profile-input mj-profile-input--short"
+                    type="text"
+                    placeholder="例：七玄门外门弟子 / 溪京城振远镖局伙计"
+                  />
+                </div>
+
                 <div class="mj-profile-row">
                   <label class="mj-profile-row-k">性别</label>
                   <div class="mj-profile-chips">
@@ -460,19 +481,24 @@ onUnmounted(() => {
                 <textarea
                   v-model="memory"
                   class="mj-profile-input mj-profile-input--tall"
-                  rows="5"
-                  placeholder="例：在药圃初遇韩立，嫌其木讷却认可能采到月光草的本事；曾受其解围，欠下一份人情"
+                  rows="7"
+                  placeholder="一行时间 / 一行地点 / 一行正文，空行分条，新的在最上面。例：
+0005年12月20日 17:00
+溪京城·振远镖局·院内
+擦净灶台又到院门口张望了一回，见坊市方向只有暮色，回身把蒸好的饭用棉布盖好，盼姐姐早些到家。"
                 />
                 <div class="mj-profile-counter" :class="{ 'mj-profile-counter--warn': memoryOverThreshold }">
-                  {{ memoryLength }} 字<span v-if="memoryOverThreshold"> · 已超过 {{ MEMORY_COMPRESS_THRESHOLD }} 字，NPC 的记忆会在下回合由 AI 压缩至约 {{ MEMORY_COMPRESS_TARGET }} 字</span>
+                  {{ memoryLength }} 字<span v-if="memoryOverThreshold"> · 已超过 {{ MEMORY_COMPRESS_THRESHOLD }} 字，记忆会在下回合由 AI 提炼压缩至约 {{ MEMORY_COMPRESS_TARGET }} 字（保留事实、压短文字，不删条目）</span><span v-else> · 未超 {{ MEMORY_COMPRESS_THRESHOLD }} 字时 AI 只追加新条目，你写的内容不会被改写</span>
                 </div>
               </div>
 
               <label v-if="isNpc" class="mj-profile-switch">
                 <input v-model="aiMaintained" type="checkbox" />
-                <span>允许 AI 自动更新（关闭则锁定为玩家设定）</span>
+                <span>允许 AI 自动更新（取消勾选 = 锁定为玩家设定，AI 不再覆写；改动文字不会自动取消勾选）</span>
               </label>
-              <p v-else class="mj-profile-note">主角画像由玩家自行设定，AI 不会改写。</p>
+              <p v-else class="mj-profile-note">
+                性格与外貌由玩家设定，AI 不会改写；<b>记忆由 AI 每回合维护</b>（上方同样可手动改）。
+              </p>
 
               <p v-if="savedHint" class="mj-profile-saved-hint">{{ savedHint }}</p>
             </div>

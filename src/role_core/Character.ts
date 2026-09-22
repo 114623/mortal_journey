@@ -17,6 +17,7 @@ import {
   TABLE,
   PROFILE_FIELD_MAX_LENGTH,
   MEMORY_MAX_LENGTH,
+  MEMORY_COMPRESS_THRESHOLD,
   normalizeProfile,
 } from "./types/playInfo";
 import {
@@ -46,6 +47,8 @@ import {
 import { applyLinggenElixirBoost } from "./types/elixir";
 import { applyStatConversions, applyResourceConversions, type TreasureConversion } from "./types/treasure";
 import { treasureTierFactor, resolveItemTier, gongfaTierFactor, ensureGongfaTier } from "./types/itemTier";
+import { guardMemoryUpdate, splitMemoryEntries } from "./memoryLog";
+import { gameLog } from "../log/gameLog";
 
 const HP_PER_PHYSIQUE = 10;
 const MP_PER_SPIRIT = 10;
@@ -375,6 +378,43 @@ export class Character {
   }
 
   /**
+   * 主角记忆通道：追加 / 替换 AI 维护的记忆日志（**只动 memory**，性格与外貌不由 AI 管）。
+   *
+   * 与 {@link applyAiProfile} 的两点区别：
+   *   1. 主角的性格 / 外貌是玩家设定，AI 一律不碰，故单独开一条只写记忆的通道；
+   *   2. 主角画像整体可能是 `source:"manual"`，但记忆是 AI 维护的日志，不受该锁定影响。
+   *
+   * @param entries 本轮新增条目（三行一条，新的在前），见 `memoryLog` 的格式约定。
+   * @param fullText 压缩轮专用：AI 提炼后的**整段**记忆；给了它就以它为准（仍走只追加校验）。
+   * @returns 是否实际写入。
+   */
+  appendAiMemoryEntries(entries: string[], fullText?: string): boolean {
+    const incoming = (entries ?? [])
+      .map((e) => String(e ?? "").replace(/\r\n?/g, "\n").trim())
+      .filter((e) => e.length > 0);
+    const full = String(fullText ?? "").replace(/\r\n?/g, "\n").trim();
+    if (!full && incoming.length === 0) return false;
+
+    // 主角记忆的契约是「只给本轮新增条目」，整段（full）只在压缩轮才合法。
+    // 没超阈值时模型若越权回传整段，直接丢弃整段、只取新增条目——否则玩家手写的
+    // 条目会被模型的一版重写整体顶掉。
+    const compressing = String(this.profile.memory ?? "").trim().length > MEMORY_COMPRESS_THRESHOLD;
+    const useFull = compressing ? full : "";
+
+    const next = useFull || [...incoming, ...splitMemoryEntries(this.profile.memory)].join("\n\n");
+    const guarded = guardMemoryUpdate(this.profile.memory, next);
+    if (guarded.repaired) {
+      gameLog.warn(
+        `[画像] ${this.displayName} 的记忆含 ${guarded.rewritten} 条改写、${guarded.missing} 条丢失，` +
+          `已按「只追加」回滚`,
+      );
+    }
+    if (guarded.text === this.profile.memory) return false;
+    this.setProfileMemory(guarded.text);
+    return true;
+  }
+
+  /**
    * 应用 AI 生成 / 更新的画像片段（性格 / 记忆）。
    *
    * 玩家已手动锁定（`source === "manual"`）时整体拒绝写入并返回 false，
@@ -391,7 +431,16 @@ export class Character {
       changed = true;
     }
     if (typeof patch.memory === "string" && patch.memory.trim()) {
-      this.setProfileMemory(patch.memory.trim());
+      // 记忆是「只追加、不改旧条目」的日志：AI 每回合返回整段文本，容易顺手润色旧条目，
+      // 这里按时间行逐条校验，改写过的版本会被回滚成「旧条目原样 + 新条目追加到顶部」。
+      const guarded = guardMemoryUpdate(this.profile.memory, patch.memory.trim());
+      if (guarded.repaired) {
+        gameLog.warn(
+          `[画像] ${this.displayName} 的记忆含 ${guarded.rewritten} 条改写、${guarded.missing} 条丢失，` +
+            `已按「只追加」回滚`,
+        );
+      }
+      this.setProfileMemory(guarded.text);
       changed = true;
     }
     return changed;

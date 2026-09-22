@@ -34,7 +34,7 @@ export interface ProfileDraft {
 /** 主角在待应用队列里的键（NPC 用其稳定 npcId）。 */
 export const PROTAGONIST_PENDING_KEY = "__protagonist__";
 
-/** NPC 基础信息草稿（名字 / 性别 / 年龄 / 寿元 / 境界 / 灵根）。 */
+/** NPC 基础信息草稿（名字 / 性别 / 年龄 / 寿元 / 境界 / 灵根 / 身份简介）。 */
 export interface NpcBasicsDraft {
   /** 目标 NPC 的稳定 id（定位用，草稿本身不改它）。 */
   npcId: string;
@@ -45,6 +45,11 @@ export interface NpcBasicsDraft {
   realmMajor: string;
   realmMinor: string;
   linggen: string[];
+  /**
+   * 身份称谓——角色卡与信息界面里「名字下面那行简介」的可编辑部分
+   * （显示为「身份 · 境界」）。玩家可在「角色设定」里直接改。
+   */
+  identity: string;
 }
 
 /** 待应用改动的存档形态（纯 JSON）。 */
@@ -160,6 +165,7 @@ export function readNpcBasicsDraft(npc: Npc): NpcBasicsDraft {
     realmMajor: npc.realm?.major ?? "练气",
     realmMinor: npc.realm?.minor ?? "初期",
     linggen: [...(npc.linggen ?? [])],
+    identity: npc.identity ?? "",
   };
 }
 
@@ -179,6 +185,7 @@ export function applyNpcBasicsDraft(npc: Npc, draft: NpcBasicsDraft): void {
   npc.setShouyuan(draft.shouyuan);
   npc.setRealm(draft.realmMajor, draft.realmMinor);
   npc.linggen = [...draft.linggen];
+  npc.identity = (draft.identity ?? "").trim();
 
   if (realmChanged) {
     // 主属性是从境界表实时派生的（realmTableBaseOrStored），改境界即自动生效；
@@ -330,6 +337,7 @@ export function restorePendingEdits(raw: unknown): void {
         realmMajor: typeof d.realmMajor === "string" ? d.realmMajor : "练气",
         realmMinor: typeof d.realmMinor === "string" ? d.realmMinor : "初期",
         linggen: Array.isArray(d.linggen) ? d.linggen.map((x: unknown) => String(x)) : [],
+        identity: typeof d.identity === "string" ? d.identity : "",
       };
     }
   }

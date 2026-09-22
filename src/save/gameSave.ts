@@ -439,7 +439,7 @@ export function isEndedSave(p: MjSavePayload | null | undefined): boolean {
  */
 export function restoreSave(payload: MjSavePayload): void {
   // 存档迁移：阶层系统上线前的老存档，功法全部缺 tier 字段。
-  // 补「与持有者同阶」——同阶压制系数为 1、也不算不入流，数值与行为完全不变，
+  // 补「与持有者同阶」——同阶压制系数为 1，数值与行为完全不变，
   // 但阶层从此显形（天道编辑/修为摘要可见），此后境界提升即按正常规则参与压制。
   // 必须在 loadFromJson / restoreNpcs 之前做（它们会拷贝/重建数据）。
   const migratedGongfa =

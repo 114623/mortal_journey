@@ -67,6 +67,49 @@ export function sanitizeJsonLike(text: string): string {
   return s;
 }
 
+/**
+ * 把 JSON **字符串字面量内部**的裸换行转义成 `\n`。
+ *
+ * 场景：记忆日志是多行文本，模型经常直接把换行写进 JSON 字符串里（合法 JSON 必须写 `\n`），
+ * 结果整段 `<NPC_NEARBY_TAG>` 解析失败 → 人物卡全丢、战斗触发因缺卡被拦。
+ * 只在字符串内部处理，数组/对象的结构换行与缩进不受影响。
+ */
+export function escapeRawNewlinesInStrings(src: string): string {
+  let out = "";
+  let inStr = false;
+  let escaped = false;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (!inStr) {
+      if (ch === '"') inStr = true;
+      out += ch;
+      continue;
+    }
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      out += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = false;
+      out += ch;
+      continue;
+    }
+    if (ch === "\n") {
+      out += "\\n";
+      continue;
+    }
+    if (ch === "\r") continue;
+    out += ch;
+  }
+  return out;
+}
+
 export function tryParseJsonArray(text: string): unknown[] | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
@@ -81,11 +124,16 @@ export function tryParseJsonArray(text: string): unknown[] | null {
   };
   let result = tryParse(trimmed);
   if (result) return result;
+  // 字符串里带裸换行（多行记忆）导致的失败：先转义再试。
+  result = tryParse(escapeRawNewlinesInStrings(trimmed));
+  if (result) return result;
   const start = trimmed.indexOf("[");
   const end = trimmed.lastIndexOf("]");
   if (start >= 0 && end > start) {
     const segment = trimmed.slice(start, end + 1);
     result = tryParse(segment);
+    if (result) return result;
+    result = tryParse(escapeRawNewlinesInStrings(segment));
     if (result) return result;
     result = tryParse(sanitizeJsonLike(segment));
     if (result) return result;

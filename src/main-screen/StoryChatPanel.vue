@@ -451,6 +451,17 @@ async function applyStateResult(stateResult: StateParsed, linggen: string[]): Pr
       gameLog.error("[StoryChat] 主角状态更新失败：" + (e instanceof Error ? e.message : String(e)));
     }
 
+    // 主角记忆（AI 维护的日志）：只写 memory，性格与外貌不由 AI 管。
+    try {
+      const mem = stateResult.protagonistMemory;
+      if (mem && (mem.full || mem.entries.length > 0)) {
+        current.appendAiMemoryEntries(mem.entries, mem.full);
+        Protagonist.notifyChanged();
+      }
+    } catch (e) {
+      gameLog.error("[StoryChat] 主角记忆更新失败：" + (e instanceof Error ? e.message : String(e)));
+    }
+
     try {
       if (stateResult.timeAdvance && props.worldTime) {
         const delta = stateResult.timeAdvance;
@@ -751,7 +762,7 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
 
     try {
       generatingPhase.value = "state";
-      const stateResult: StateParsed = await generateState({
+      const stateInput = {
         apiUrl: url,
         apiKey: String(apiKey.value || "").trim() || undefined,
         model,
@@ -764,9 +775,36 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
         recentOptionTexts: prevOptionTexts,
         sceneDirective,
         signal: ac.signal,
-      });
+      };
+      const stateResult: StateParsed = await generateState(stateInput);
 
       if (abortCtl !== ac) return;
+
+      // 兜底：既没有推进选项也没有战斗触发 = 玩家这一回合无路可走。
+      // 常见成因是模型漏写/提前收笔，末尾两段标签没出来——带一句点名要求重试一次，
+      // 重试结果**只取选项与战斗触发**，状态不重复应用（避免修为、物品、时间被算两遍）。
+      if (!stateResult.actionOptions && !stateResult.battleTrigger) {
+        gameLog.warn("[推进] 本回合既无推进选项也无战斗触发，点名重试一次。");
+        const retryHint =
+          `${sceneDirective ? sceneDirective + "\n" : ""}` +
+          "【补充·最重要】你上一条输出漏了收尾标签：本条必须完整输出第 11 段（满足战斗触发条件时）" +
+          "与第 13 段（4 条并列推进选项），不得留空、不得因为前面内容长而提前收笔。";
+        try {
+          const retry = await generateState({ ...stateInput, sceneDirective: retryHint });
+          if (abortCtl !== ac) return;
+          if (retry.actionOptions) stateResult.actionOptions = retry.actionOptions;
+          if (!stateResult.battleTrigger && retry.battleTrigger) {
+            stateResult.battleTrigger = retry.battleTrigger;
+          }
+          if (!stateResult.actionOptions && !stateResult.battleTrigger) {
+            gameLog.warn("[推进] 重试后仍无选项与战斗触发，本回合将不显示推进选项。");
+          }
+        } catch (retryErr) {
+          gameLog.error(
+            "[推进] 点名重试失败：" + (retryErr instanceof Error ? retryErr.message : String(retryErr)),
+          );
+        }
+      }
 
       // 合并本回合 AI 报的场景进度（秘境层 / 擂台轮），供下一轮算配额。
       applySceneReport(stateResult.sceneReport);
@@ -917,8 +955,11 @@ function formatNpcProfileSuffix(npc: Npc): string {
   const mem = prof.memory.trim();
   if (mem) {
     // 附上字数：状态 AI 据此判断是否触发「超 1000 字压缩到 700 字」。
+    // 记忆是三行一条的日志（新的在最上面），压缩 = 提炼压短旧条目，不是整条删掉。
     const needCompress = mem.length > MEMORY_COMPRESS_THRESHOLD;
-    parts.push(`记忆(${mem.length}字${needCompress ? `·需压缩至${MEMORY_COMPRESS_TARGET}字` : ""})[${mem}]`);
+    parts.push(
+      `记忆(${mem.length}字${needCompress ? `·超${MEMORY_COMPRESS_THRESHOLD}字，需把旧条目提炼压缩至约${MEMORY_COMPRESS_TARGET}字（保留事实、压短文字，不是删条目）` : ""})[${mem}]`,
+    );
   }
   const locked = prof.source === "manual" ? " [画像已锁定·勿改]" : "";
   if (parts.length === 0) return locked;

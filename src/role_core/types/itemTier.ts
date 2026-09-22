@@ -9,13 +9,13 @@
  * 实现方式是双层闭环：
  *   ① 生成时：数值 = 基础值 × TIER_MULT[tier]（高阶层物品的初始数值本来就更高）
  *   ② 使用时：跨境界威能衰减（法宝走 {@link treasureTierFactor}、功法走
- *      {@link gongfaTierFactor} → tierFactor，同为 0.65^Δ 低阶衰减；
- *      功法另有境界高出后「已不入流」不再产修为，见 {@link isGongfaObsolete}）
+ *      {@link gongfaTierFactor} → tierFactor，同为 0.65^Δ 低阶衰减）
  *
  * 丹药有独立系数（见 `elixirTierFactor`），材料待扩展。
  *
- * 功法额外有一条**修为门槛**：使用者境界高于功法阶层时，修炼该功法不再产出修为，
- * 见 {@link isGongfaObsolete}。
+ * 【2026-09-21 变更】原「境界高于功法阶层 → 该功法已不入流、修炼不再产修为」的门槛
+ * 已整体移除（isGongfaObsolete / describeGongfaCultivation 一并删除）：
+ * 低阶功法现在只吃跨阶压制系数（打起来吃亏），不再卡住修为增长。
  */
 
 /* 只取类型，不取运行时值。
@@ -569,40 +569,6 @@ export function gongfaTierFactor(
   const t = resolveGongfaTier(tier);
   if (!t) return 1;
   return tierFactor(t, userRealmMajor);
-}
-
-/**
- * 该功法对当前境界而言是否已「不入流」——即使用者境界**高于**功法阶层。
- *
- * 判定为真的功法：修炼它不再产出任何修为（但熟练度与属性加成仍按
- * {@link gongfaTierFactor} 正常计算）。这是「换功法」的核心动机。
- *
- * 注：NPC 不走这条规则——NPC 没有独立的修炼结算，见 `Protagonist.applyStateChanges`。
- *
- * @param tier 功法阶层；为空表示未指定阶层，永不过时。
- * @param userRealmMajor 使用者当前大境界。
- */
-export function isGongfaObsolete(
-  tier: string | null | undefined,
-  userRealmMajor: string | null | undefined,
-): boolean {
-  const t = resolveGongfaTier(tier);
-  if (!t) return false;
-  if (!userRealmMajor) return false;
-  const itemIdx = tierIndex(t);
-  const userIdx = tierIndex(userRealmMajor);
-  if (itemIdx < 0 || userIdx < 0) return false;
-  return userIdx > itemIdx;
-}
-
-/** 功法修为门槛的 UI 文案；未过时时返回空串。 */
-export function describeGongfaCultivation(
-  tier: string | null | undefined,
-  userRealmMajor: string | null | undefined,
-): string {
-  if (!isGongfaObsolete(tier, userRealmMajor)) return "";
-  const t = resolveGongfaTier(tier) as ItemTier;
-  return `${tierLabel(t)} · 已不入流，修炼不再增进修为（需${userRealmMajor}阶功法）`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

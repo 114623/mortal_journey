@@ -15,7 +15,7 @@ import type {
 } from "./types/itemInfo";
 import type { TreasureSpecialEffect } from "./types/treasure";
 import { rollTreasureFunction, rollTreasureSpecialEffect } from "./types/treasure";
-import { rollItemTier, resolveItemTier, applyElixirTierSuppression, isGongfaObsolete, ensureGongfaTierList } from "./types/itemTier";
+import { rollItemTier, resolveItemTier, applyElixirTierSuppression, ensureGongfaTierList } from "./types/itemTier";
 import { rollMortalMartialArt } from "./types/mortalArsenal";
 import type { GongfaSpecialEffect, GongfaSystem } from "./types/gongfa";
 import { rollGongfaFunction, normalizeGongfaSystem, normalizeGongfaRole } from "./types/gongfa";
@@ -691,38 +691,25 @@ export class Protagonist extends Character {
     // 修为 / 功法熟练度
     try {
       if (state.userState) {
+        // 修为结算（2026-09-21 起已取消「功法不入流不产修为」门槛）：
+        // 无论练的是哪一阶功法，修炼进度都照常折算修为；功法阶层只影响跨阶压制系数
+        // （战斗与属性，见 gongfaTierFactor），不再卡修为。
+        const rawXiuwei = typeof state.userState.xiuweiIncrease === "number"
+          ? Math.max(0, Math.floor(state.userState.xiuweiIncrease))
+          : 0;
+        if (rawXiuwei > 0) this.addXiuwei(rawXiuwei);
+
         const changes = state.userState.gongfaMasteryChanges ?? [];
-        // 功法阶层门槛：境界高于功法阶层后，该功法「已不入流」，修炼不再产出修为。
-        // 只砍修为，不砍熟练度——招式练得更熟是人之常情，只是于修行无益。
-        // 判定放主角侧，NPC 不参与本结算，故不受影响。
-        let validExp = 0;
-        let totalExp = 0;
+        let practiceExp = 0;
         for (const change of changes) {
           const exp = typeof change.masteryExpIncrease === "number"
             ? Math.max(0, Math.floor(change.masteryExpIncrease))
             : 0;
-          totalExp += exp;
-          const slot = this.gongfaSlots.find((s) => s && s.name === change.gongfaName);
-          if (!slot || !isGongfaObsolete(slot.tier, this.realm.major)) validExp += exp;
+          practiceExp += exp;
         }
-        // xiuweiIncrease 是本回合修为增量，按「有效功法经验占比」折算：
-        // 全部练的是过时功法 → 0；一部分 → 按比例；本回合没练功（服丹/机缘）→ 不受限。
-        const rawXiuwei = typeof state.userState.xiuweiIncrease === "number"
-          ? Math.max(0, Math.floor(state.userState.xiuweiIncrease))
-          : 0;
-        const scaledXiuwei = totalExp > 0
-          ? Math.round(rawXiuwei * validExp / totalExp)
-          : rawXiuwei;
-
-        if (scaledXiuwei > 0) this.addXiuwei(scaledXiuwei);
         if (changes.length > 0) {
           this.applyGongfaMasteryExpChanges(changes);
-          if (validExp > 0) this.addXiuwei(validExp);
-        }
-        if (totalExp > 0 && validExp < totalExp) {
-          gameLog.info(
-            `[修为门槛] 本回合有 ${totalExp - validExp} 点修炼进度来自已不入流的功法，未折算为修为`,
-          );
+          if (practiceExp > 0) this.addXiuwei(practiceExp);
         }
       }
     } catch (e) {

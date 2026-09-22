@@ -11,6 +11,8 @@ import {
   SUB_STAGES,
   PROFILE_FIELD_MAX_LENGTH,
   MEMORY_MAX_LENGTH,
+  MEMORY_COMPRESS_THRESHOLD,
+  MEMORY_COMPRESS_TARGET,
   type ProtagonistPlayInfo,
   type EquippedSlotsState,
   type GongfaSlotsState,
@@ -18,7 +20,7 @@ import {
   type WorldLocation,
   type NpcRace,
 } from "../role_core/types/playInfo";
-import { type WorldTime, type TimeDelta, formatWorldTimeZhDisplay } from "../role_core/worldTime";
+import { type WorldTime, type TimeDelta, formatWorldTimeZhPrecise } from "../role_core/worldTime";
 import { describeNextBreakthrough, gongfaMaxLayerOf } from "../role_core/realmUtils";
 import { formatWorldLocationDash, parseWorldLocationFromDash } from "../role_core/types/worldLocation";
 import type { SceneReport } from "../role_core/sceneBudgetStore";
@@ -30,7 +32,7 @@ import {
   checkNpcConsistency,
   type NpcConsistencyResult,
 } from "./npcConsistency";
-import { resolveGongfaTier, isGongfaObsolete } from "../role_core/types/itemTier";
+import { resolveGongfaTier } from "../role_core/types/itemTier";
 import { genderLine, genderRule } from "./genderGuard";
 
 export interface StateGenerateInput {
@@ -203,6 +205,11 @@ export interface StateParsed {
   actionOptions: ActionSuggestions | null;
   /** 本回合 AI 报告的场景进度（秘境层 / 擂台轮）；null = 未报告。 */
   sceneReport: SceneReport | null;
+  /**
+   * 主角记忆更新（AI 维护的日志；性格与外貌不由 AI 管）。
+   * `full` 非空 = 压缩轮（AI 提炼后的整段），否则按 `entries` 逐条追加到最上面。
+   */
+  protagonistMemory: { entries: string[]; full: string } | null;
   /** NPC 与剧情正文的一致性校验结果（未传 storyBody 时为 null）。 */
   npcConsistency: NpcConsistencyResult | null;
 }
@@ -240,6 +247,8 @@ const TAG_TIME_OPEN = "<MJ_TIME_TAG>";
 const TAG_TIME_CLOSE = "</MJ_TIME_TAG>";
 const TAG_BREAKTHROUGH_OPEN = "<MJ_BREAKTHROUGH_TAG>";
 const TAG_BREAKTHROUGH_CLOSE = "</MJ_BREAKTHROUGH_TAG>";
+const TAG_PROTAGONIST_MEMORY_OPEN = "<MJ_PROTAGONIST_MEMORY_TAG>";
+const TAG_PROTAGONIST_MEMORY_CLOSE = "</MJ_PROTAGONIST_MEMORY_TAG>";
 
 function extractWorldBody(raw: string): WorldLocation | null {
   const s = raw == null ? "" : String(raw);
@@ -846,6 +855,7 @@ export function parseStateAiResponse(
   const actionOptions = parseActionOptions(raw);
   const sceneReport = parseSceneReport(raw);
   const factionChanges = parseFactionChanges(raw);
+  const protagonistMemory = parseProtagonistMemory(raw);
 
   return {
     worldLocation,
@@ -863,8 +873,40 @@ export function parseStateAiResponse(
     storySnapshot,
     actionOptions,
     sceneReport,
+    protagonistMemory,
     npcConsistency,
   };
+}
+
+/**
+ * 解析主角记忆更新。
+ *
+ * 约定两种形态：
+ *   - 常规：`{"entries":["时间行\n地点行\n正文", …]}` —— 逐条追加到最上面；
+ *   - 压缩轮：`{"full":"提炼后的整段记忆","entries":[…]}` —— 以 full 为准（仍走只追加校验）。
+ * 模型若直接给数组或裸文本，按「条目列表」处理。
+ */
+function parseProtagonistMemory(raw: string): { entries: string[]; full: string } | null {
+  const text = extractTagContent(raw, TAG_PROTAGONIST_MEMORY_OPEN, TAG_PROTAGONIST_MEMORY_CLOSE);
+  if (!text.trim()) return null;
+
+  const clean = (arr: unknown[]): string[] =>
+    arr.map((x) => String(x ?? "").replace(/\r\n?/g, "\n").trim()).filter((s) => s.length > 0);
+
+  const obj = safeJsonParse(text);
+  if (Array.isArray(obj)) {
+    return { entries: clean(obj), full: "" };
+  }
+  if (obj && typeof obj === "object") {
+    const o = obj as Record<string, unknown>;
+    const entries = Array.isArray(o.entries) ? clean(o.entries) : [];
+    const full = typeof o.full === "string" ? o.full.replace(/\r\n?/g, "\n").trim() : "";
+    if (entries.length === 0 && !full) return null;
+    return { entries, full };
+  }
+  // 裸文本兜底：按空行切成条目。
+  const entries = clean(text.split(/\n\s*\n/));
+  return entries.length > 0 ? { entries, full: "" } : null;
 }
 
 function formatEquipSlot(label: string, slot: EquippedSlotsState[number]): string {
@@ -889,13 +931,10 @@ function formatGongfaSlots(slots: GongfaSlotsState, realmMajor?: string): string
     const exp = g.masteryExp ?? 0;
     const maxLayer = gongfaMaxLayerOf(g);
     const expStr = mastery < maxLayer ? `，进度${exp}` : "";
-    // 阶层面直接暴露给状态 AI：功法阶层低于主角境界时修炼不产修为（见 state_preset 3.5）。
+    // 阶层面直接暴露给状态 AI（跨阶压制系数仍与阶层有关；修为门槛已于 2026-09-21 取消）。
     const gTier = resolveGongfaTier(g.tier);
     const tierStr = gTier ? `${gTier}阶·` : "";
-    const obsoleteStr = gTier && isGongfaObsolete(gTier, realmMajor)
-      ? "【已不入流·修炼不产修为】"
-      : "";
-    lines.push(`功法：${g.name}（${tierStr}${g.grade}，第${mastery}层/${maxLayer}层${expStr}）${obsoleteStr}${g.desc ? "—" + g.desc : ""}`);
+    lines.push(`功法：${g.name}（${tierStr}${g.grade}，第${mastery}层/${maxLayer}层${expStr}）${g.desc ? "—" + g.desc : ""}`);
   }
   return lines.length > 0 ? lines.join("\n") : "无";
 }
@@ -915,6 +954,22 @@ function formatInventorySlots(slots: Array<InventoryStackItem | null>): string {
   return items.map(formatInventoryItem).join("、");
 }
 
+/**
+ * 主角记忆（AI 维护的日志）注入段。
+ *
+ * 与 NPC 记忆同一套三行日志格式；超过阈值时提示 AI 本轮做「提炼压缩」（给 full）。
+ * 主角没有内容时给一行占位，避免 AI 以为没有这个机制。
+ */
+function protagonistMemoryHint(p: { profile?: { memory?: string } }): string {
+  const mem = (p?.profile?.memory ?? "").trim();
+  if (!mem) return "\n【主角记忆】暂无（本回合若有值得记的事，在 <MJ_PROTAGONIST_MEMORY_TAG> 里开条）";
+  const needCompress = mem.length > MEMORY_COMPRESS_THRESHOLD;
+  return (
+    `\n【主角记忆】${mem.length}字` +
+    `${needCompress ? `·超${MEMORY_COMPRESS_THRESHOLD}字，本轮必须提炼压缩至约${MEMORY_COMPRESS_TARGET}字并放进 full（不是删条目）` : ""}\n${mem}`
+  );
+}
+
 function buildStateUserContent(input: StateGenerateInput): string {
   const p = input.protagonist;
 
@@ -926,8 +981,10 @@ function buildStateUserContent(input: StateGenerateInput): string {
     ? `\n主角当前所在地点（本轮剧情发生前·出发点）：${formatWorldLocationDash(input.currentWorldLocation)}`
     : "";
 
+  // 带「时」的精确时间：NPC 记忆日志的时间行要用到（写「某日」或凭空编分钟都会与游戏时间对不上）。
   const timeHint = input.currentWorldTime
-    ? `\n当前世界时间：${formatWorldTimeZhDisplay(input.currentWorldTime)}`
+    ? `\n当前世界时间：${formatWorldTimeZhPrecise(input.currentWorldTime)}` +
+      `（本轮推进后的时间 = 此时间 + 你输出的时间增量，写记忆时用推进后的值）`
     : "";
 
   // 推进轴轮换：把最近 3 轮用过的轴告诉 AI，避免连续多轮只在同一类轴里打转。
@@ -970,6 +1027,7 @@ function buildStateUserContent(input: StateGenerateInput): string {
     `灵根：${(p as { linggen?: string[] }).linggen?.join("") || "无"}`,
     locationHint,
     timeHint,
+    protagonistMemoryHint(p),
     "",
     "【装备】",
     formatEquippedSlots(p.equippedSlots),

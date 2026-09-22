@@ -17,7 +17,7 @@ import type { CultivationRealm, EquipSlotKey, PrimaryStatKey, TraitEntry } from 
 import { PRIMARY_STAT_KEY_TO_ZH } from "../role_core/types/playInfo";
 import type { TreasureSpecialEffect, TreasureConversion, TreasureConversionEffect } from "../role_core/types/treasure";
 import { TREASURE_MODIFIER_NAMES } from "../role_core/types/treasure";
-import { resolveItemTier, tierLabel, describeTierSuppression, describeElixirTierSuppression, applyElixirTierSuppression, describeGongfaCultivation } from "../role_core/types/itemTier";
+import { resolveItemTier, tierLabel, describeTierSuppression, describeElixirTierSuppression, applyElixirTierSuppression } from "../role_core/types/itemTier";
 import type { GongfaSpecialEffect } from "../role_core/types/gongfa";
 import { resolveGongfaEffectDisplay, resolveGongfaLayer10 } from "../role_core/types/gongfa";
 import { gradeToTraitRarity, getGongfaMasteryProgress } from "./protagonistPanelDisplay";
@@ -414,9 +414,9 @@ export function buildGongfaDetailPayload(
   pushSec(sections, "品级", gf.grade);
   // 阶层：决定数值量级、跨阶压制与**层数上限**，是功法最核心的定位信息。
   {
-    const obsoleteText = describeGongfaCultivation(gf.tier, protagonist.value?.realm?.major);
-    const tierText = gf.tier ? tierLabel(gf.tier) : "未定";
-    pushSec(sections, "阶层", obsoleteText ? `${tierText} · ${obsoleteText}` : tierText);
+    // 2026-09-21：原「已不入流 · 修炼不再增进修为」提示已随该机制一并移除，
+    // 阶层现在只反映数值量级、跨阶压制与层数上限。
+    pushSec(sections, "阶层", gf.tier ? tierLabel(gf.tier) : "未定");
   }
   const maxLayer = gongfaMaxLayerOf(gf);
   {

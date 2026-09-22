@@ -139,23 +139,45 @@ export function useNpcStore() {
     const currentWorldTime = options?.currentWorldTime ?? null;
     const touchedThisRound = new Set<Npc>();
     const createdThisRound: Npc[] = [];
+    /**
+     * 本回合已经用过的名字。
+     *
+     * 用途：AI 输出"五名守山弟子"这类群体时，常常给出 5 条 **同名** 的条目。
+     * 而 store 是按 displayName 索引的——同名条目会全部命中同一个人，5 条塌成 1 条，
+     * 玩家看到的就是"剧情里五个人、面板里一个人"。故同回合内第二次出现的同名条目
+     * 一律视为**另一个人**，另起名（守山弟子（2）…）单独建卡。
+     */
+    const usedNames = new Set<string>();
 
     for (const entry of entries) {
       const name = entry.displayName?.trim();
       if (!name) continue;
 
       const existingByNpcId = entry.npcId ? findByNpcId(entry.npcId) : undefined;
-      const existing = existingByNpcId ?? npcMap.value.get(name);
+      let existing = existingByNpcId ?? npcMap.value.get(name);
+      // 该名字本回合已被占用（且不是按 npcId 精确命中的既有 NPC）→ 当作新个人处理。
+      if (existing && !existingByNpcId && usedNames.has(name)) existing = undefined;
+
       if (existing) {
         existing.mergeFromAi(entry, protagonistLinggen);
-        // 若 AI 这次给了 npcId 而旧 NPC 没有稳定 id，补记一下（便于后续按 id 查）。
-        if (entry.npcId && existing.id !== entry.npcId && !existing.id.startsWith("npc_")) {
-          // id 已稳定存储，保留不动，避免身份漂移
-        }
         touchedThisRound.add(existing);
+        usedNames.add(name);
       } else {
-        const npc = Npc.fromAiData(entry, protagonistLinggen, currentLocation, currentWorldTime);
-        npcMap.value.set(name, npc);
+        // 名字撞车就加序号，保证每个人在 store 里各占一格。
+        let uniqueName = name;
+        let seq = 2;
+        while (npcMap.value.has(uniqueName) || usedNames.has(uniqueName)) {
+          uniqueName = `${name}（${seq}）`;
+          seq += 1;
+        }
+        usedNames.add(uniqueName);
+        const npc = Npc.fromAiData(
+          { ...entry, displayName: uniqueName },
+          protagonistLinggen,
+          currentLocation,
+          currentWorldTime,
+        );
+        npcMap.value.set(uniqueName, npc);
         touchedThisRound.add(npc);
         createdThisRound.push(npc);
       }
