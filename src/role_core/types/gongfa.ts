@@ -54,16 +54,71 @@ function sampleLayerCurve(arr: readonly number[], layer: number): number {
 }
 
 /**
- * 把「第 `layer` 层 / 共 `maxLayer` 层」映射到 10 层基准曲线的连续位置（1~10）。
+ * 【2026-09-25 v4 删除】原 `resolveGongfaLayer10`（整数层 → 10 层曲线位置）已移除。
  *
- * 功法的数值区间写成 [第1层, 第10层]，但低阶功法只有三五层——此时每跨一层
- * 走完基准曲线上更大的一段：练气功法（5 层）第 5 层即达到区间上限。
+ * v4 起统一走连续层号：目录取样位置 `layer10 = 1 + (contLayer-1)/18 × 9`
+ * （由 `battleInit` / `protagonistDetailPayload` 各自算出后传入 `atLayer`），
+ * 化神满层 L19 → 10、练气满层 L7 → 4。层内经验立刻反映到技能数值上。
  */
-export function resolveGongfaLayer10(layer: number, maxLayer: number): number {
-  const m = Math.max(1, Math.floor(maxLayer));
-  const l = Math.max(1, Math.min(layer, m));
-  if (m <= 1) return 10;
-  return 1 + (l - 1) * 9 / (m - 1);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 品阶系数（v4）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * 技能**属性加成项**（`scalingRatio × 属性`）的品阶系数。
+ *
+ * 目标：满层同阶单体一击 ≈ 该阶层后期血量的 20%~45%（下品→神品分档）。
+ * 系数 = 目标 sr ÷ 目录该品阶单体主技能满层 sr。
+ * 对目录内**所有**条目统一乘，保留条目间原有的相对设计
+ * （群体 / DoT / 真伤天然更低，不额外折算）。
+ */
+export const GRADE_SKILL_SR_MULT: Readonly<Record<string, number>> = {
+  下品: 0.33,
+  中品: 0.28,
+  上品: 0.25,
+  极品: 0.23,
+  仙品: 0.22,
+  神品: 0.21,
+};
+
+/** 取某品阶的技能属性项系数；未知品阶返回 1（不折算）。 */
+export function gradeSkillSrMult(grade: string | null | undefined): number {
+  if (!grade) return 1;
+  return GRADE_SKILL_SR_MULT[grade] ?? 1;
+}
+
+/**
+ * 法力消耗：**占自身最大法力的百分比**（[第 1 层%, 满层 L19%]）。
+ *
+ * 目录里的 `mpCost` 绝对点数自此**不再使用**（字段保留，避免动 200+ 条目录数据）。
+ * 按层号线性插值：`pct = lo + (L-1)/18 × (hi-lo)`。
+ */
+export const GONGFA_MP_PCT_BY_GRADE: Readonly<Record<string, readonly [number, number]>> = {
+  下品: [15, 20],
+  中品: [16, 23],
+  上品: [18, 27],
+  极品: [20, 31],
+  仙品: [22, 34],
+  神品: [24, 36],
+};
+
+/**
+ * 按连续层号取法力消耗百分比。
+ *
+ * @param grade 品阶；未知时回退「上品」。
+ * @param contLayer 连续层号（1~19）。
+ * @returns 百分比（如 18 表示 18%）。
+ */
+export function gongfaMpPct(grade: string | null | undefined, contLayer: number): number {
+  const row = (grade && GONGFA_MP_PCT_BY_GRADE[grade]) || GONGFA_MP_PCT_BY_GRADE["上品"];
+  const t = Math.max(0, Math.min(1, ((Number.isFinite(contLayer) ? contLayer : 1) - 1) / 18));
+  return row[0] + t * (row[1] - row[0]);
+}
+
+/** 由最大法力与百分比算实际蓝耗（至少 1）。 */
+export function gongfaMpCost(maxMp: number, pct: number): number {
+  return Math.max(1, Math.round(Math.max(0, maxMp) * pct / 100));
 }
 
 export function atLayer(val: LayerValue, layer: number): number {
@@ -168,17 +223,110 @@ export interface GongfaSpecialEffect {
 // 描述解析
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 技能【绝对点数】的底盘：层号曲线 × 类型系数 × 体系系数
+//
+//     【2026-09-25】目录里的 `baseValue` / `summonDamage` / 定值 `tickValue`
+//     是按**高境界量级**写死的绝对点数（极品 250~1500、神品 500~2500）。
+//     旧口径把它 × `gongfaSkillRealmScale`（练气中期仅 0.0091）→ 只剩 6 点，
+//     等于归零，于是练气期把功法练满，技能仍弱于普攻。
+//
+//     现改为：`底盘 = realmScale.gongfaBvValue(连续层号) × 类型系数 × 体系系数`。
+//     底盘**只认层号**（同层同值），不看使用者境界 —— 否则会废掉自然淘汰
+//     （练气功法带到化神会被算成化神量级，永远淘汰不掉）。
+//
+//     底盘由调用方算好传入（`bvValue`）：本文件在 `types/` 下，
+//     直接 import `realmScale` 会与 `realmUtils` / `playInfo` 构成环（有 TDZ 白屏前科）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * 各效果类型的**底盘系数**（相对 `gongfaBvValue` 曲线值）。
+ *
+ * 系数是"摊薄"：把一次施法能打出的总量按触发次数/目标数摊到单次显示值上。
+ *   - 伤害类 1.0（基准）；
+ *   - heal 0.9：治疗不该比伤害更划算（且可叠加续航）；
+ *   - shield 1.2：护盾一次性、不吃减伤，得更厚才有存在感；
+ *   - counter 0.7：被动触发、无消耗无冷却，触发频次远高于主动技；
+ *   - summon 0.45：`countPerCast` 1~10 柄，按 ~5 柄摊薄；
+ *   - applyStatus 0.35：`duration 3 × maxStacks 3` ≈ 9 跳，摊到每跳。
+ *
+ * ⚠️ 只针对**绝对点数**。百分比型（`isPercent` / `percent` / `damagePercent` /
+ * `hpPercent`）与 `applyModifier.value` 天然水涨船高或本就是百分比，一律不参与。
+ */
+const BV_TYPE_MULT: Readonly<Record<string, number>> = {
+  dealDamage: 1.0,
+  dealDamageExecute: 1.0,
+  dealDamagePierce: 1.0,
+  dealDamageBySummon: 1.0,
+  heal: 0.9,
+  shield: 1.2,
+  counter: 0.7,
+  summon: 0.45,
+  applyStatus: 0.35,
+};
+
+/** 只有**直接造成伤害**的条目受体系系数影响（其余类型的差异已由机制本身表达）。 */
+const DMG_BV_TYPES: Readonly<Record<string, true>> = {
+  dealDamage: true,
+  dealDamageExecute: true,
+  dealDamagePierce: true,
+  dealDamageBySummon: true,
+};
+
+/**
+ * 【体系系数】各体系 `dealDamage` 条目的 `baseValue` 本就不一样（神品档实测）：
+ * 通用 2,500 / 魔修 5,000 / 法修 1,000 / 毒修 1,000。
+ * 底盘统一成曲线后会把这套差异抹平，故按目录的相对比例搬回来。
+ *
+ * - 魔修 1.7：目录 2.0×，压低一点（它已有 `sacrificeHp` 掉血代价，且 sr 与通用同档）；
+ * - 法修 / 毒修 0.7：目录 0.4×，抬高（各有冰冻控制 / 中毒持续伤害作为补偿，不能太弱）；
+ * - 剑修 / 体修 / 药修 1.0：走 `summon` / `shield` / `heal`，不直接出 `dealDamage`，不适用。
+ */
+const SYSTEM_BV_MULT: Readonly<Record<string, number>> = {
+  通用: 1.0,
+  剑修: 1.0,
+  体修: 1.0,
+  法修: 0.7,
+  毒修: 0.7,
+  药修: 1.0,
+  魔修: 1.7,
+};
+
+/** 取体系的底盘系数；未知或缺失返回 1。 */
+export function systemBvMult(system: string | null | undefined): number {
+  if (!system) return 1;
+  return SYSTEM_BV_MULT[system] ?? 1;
+}
+
+/** 取效果类型的底盘系数；未知类型返回 1。 */
+export function bvTypeMult(effType: string): number {
+  return BV_TYPE_MULT[effType] ?? 1;
+}
+
+/** 把调用方给的层号底盘值按「类型 × 体系」折算成该效果实际使用的点数。 */
+function bakeBv(eff: GongfaBattleEffect, bvValue: number, system?: GongfaSystem | null): number {
+  const typeMult = BV_TYPE_MULT[eff.type] ?? 1;
+  const sysMult = DMG_BV_TYPES[eff.type] ? systemBvMult(system) : 1;
+  return bvValue * typeMult * sysMult;
+}
+
 function bakeValue(
   eff: GongfaBattleEffect,
   getStat: (key: PrimaryStatKey) => number,
   masteryMult: number,
   layer: number,
+  bvValue: number = 0,
+  gradeMult: number = 1,
+  system?: GongfaSystem | null,
 ): number | undefined {
   if ("baseValue" in eff && "scalingRatio" in eff && "scalingStat" in eff) {
-    const bv = atLayer(eff.baseValue as LayerValue, layer);
-    const sr = atLayerFloat(eff.scalingRatio as LayerValue, layer);
+    // 底盘只认层号（同层同值）；**不再乘 masteryMult** —— 曲线本身已含层号成长，
+    // 再乘会双重成长。战斗倍率只作用于属性项（它才是"练得更深"的奖励）。
+    const bv = bakeBv(eff, bvValue, system);
+    // 属性项乘品阶系数：让满层同阶单体一击落在「该阶层后期血量 20%~45%」。
+    const sr = atLayerFloat(eff.scalingRatio as LayerValue, layer) * gradeMult;
     const stat = getStat(eff.scalingStat);
-    return Math.round((bv + sr * stat) * masteryMult);
+    return Math.round(bv + sr * stat * masteryMult);
   }
   return undefined;
 }
@@ -229,21 +377,34 @@ const DMG_TYPE_LABELS: Record<string, string> = {
   magical: "法术",
 };
 
+/**
+ * 展示「总数（分项公式）」。
+ *
+ * 【2026-09-25 修】括号里的分项此前是**未乘修炼倍率**的裸值，而总数乘了，
+ * 于是出现过 `造成1567（975 + 1.63×灵力）` 这种左右对不上的显示——
+ * 玩家按括号自己加一遍得到 1125，跟 1567 差了 442，看着像数值乱跳。
+ * 现在把倍率（与境界缩放）分摊进两项，括号里加起来就等于总数。
+ */
 function formatScaledValue(
   eff: GongfaBattleEffect,
   v: number | undefined,
   layer: number,
   showFormula: boolean = true,
+  bvValue: number = 0,
+  masteryMult: number = 1,
+  gradeMult: number = 1,
+  system?: GongfaSystem | null,
 ): string {
   if (v == null) return "0";
   if (!showFormula) return String(v);
   if (!("baseValue" in eff) || !("scalingRatio" in eff) || !("scalingStat" in eff)) return String(v);
-  const sr = atLayerFloat(eff.scalingRatio as LayerValue, layer);
+  const sr = atLayerFloat(eff.scalingRatio as LayerValue, layer) * masteryMult * gradeMult;
   if (sr === 0) return String(v);
-  const bv = atLayer(eff.baseValue as LayerValue, layer);
+  const bv = bakeBv(eff, bvValue, system);
   const ss = (eff as { scalingStat: GongfaScalingStat }).scalingStat;
   const statLabel = PRIMARY_STAT_KEY_TO_ZH[ss] ?? ss;
-  return `${v}（${bv} + ${Number(sr.toFixed(2))}×${statLabel}）`;
+  const r = (n: number): string => (Number.isInteger(n) ? String(n) : n.toFixed(n < 10 ? 2 : 0));
+  return `${v}（${r(bv)} + ${r(sr)}×${statLabel}）`;
 }
 
 export function resolveGongfaBattleEffectDesc(
@@ -254,9 +415,12 @@ export function resolveGongfaBattleEffectDesc(
   showFormula: boolean = true,
   selfByDefault: boolean = false,
   isAoE: boolean = false,
+  bvValue: number = 0,
+  gradeMult: number = 1,
+  system?: GongfaSystem | null,
 ): string {
-  const v = bakeValue(eff, getStat, masteryMult, layer);
-  const sv = formatScaledValue(eff, v, layer, showFormula);
+  const v = bakeValue(eff, getStat, masteryMult, layer, bvValue, gradeMult, system);
+  const sv = formatScaledValue(eff, v, layer, showFormula, bvValue, masteryMult, gradeMult, system);
   const durLabel = (duration: number) =>
     selfByDefault ? "" : (duration >= 99 ? "（永久）" : `，持续${duration}回合`);
 
@@ -309,7 +473,10 @@ export function resolveGongfaBattleEffectDesc(
     }
     case "applyStatus": {
       const label = STATUS_LABELS[eff.statusType] ?? eff.statusType;
-      const tick = atLayer(eff.tickValue, layer);
+      // 定值跳伤同 dealDamage 一样走层号底盘（按跳数摊薄）；百分比型天然水涨船高，不动。
+      const tick = eff.isPercent
+        ? atLayer(eff.tickValue, layer)
+        : Math.round(bvValue * (BV_TYPE_MULT.applyStatus ?? 0.35));
       const tickStr = eff.isPercent ? `最大生命${tick}%` : `${tick}点`;
       const stack = eff.maxStacks > 1 ? `（最多叠${eff.maxStacks}层）` : "";
       return `${isAoE ? "群体" : ""}每回合造成${tickStr}${label}伤害，持续${eff.duration}回合${stack}`;
@@ -348,7 +515,7 @@ export function resolveGongfaBattleEffectDesc(
     case "revive":
       return `复活并恢复${eff.hpPercent}%生命`;
     case "summon": {
-      const baseDmg = atLayer(eff.summonDamage, layer);
+      const baseDmg = Math.round(bvValue * (BV_TYPE_MULT.summon ?? 0.45));
       let dmgText: string;
       if (eff.scalingRatio != null && eff.scalingStat) {
         const sr = atLayerFloat(eff.scalingRatio, layer);
@@ -369,19 +536,34 @@ export function resolveGongfaBattleEffectDesc(
   }
 }
 
+/**
+ * 功法详情面板的效果文案。
+ *
+ * @param gradeMult 品阶系数（`GRADE_SKILL_SR_MULT`），由调用方按功法品阶传入。
+ * @param bvValue 技能绝对点数的**底盘**（`realmScale.gongfaBvValue(连续层号)`），
+ *                由调用方算好传入——本文件在 `types/` 下，不能直接 import `realmScale`（环）。
+ * @param mpText 外部算好的蓝耗文案——v4 起蓝耗按「最大法力百分比」算，
+ *               本函数拿不到 maxMp，故由调用方传入；为空则不显示该行。
+ */
 export function resolveGongfaEffectDisplay(
   fn: GongfaSpecialEffect,
   getStat: (key: PrimaryStatKey) => number,
   masteryMult: number,
   layer: number,
   cooldownReduce: number = 0,
+  bvValue: number = 0,
+  gradeMult: number = 1,
+  mpText: string = "",
+  system?: GongfaSystem | null,
 ): string {
   const parts = fn.battleEffects
-    .map(e => resolveGongfaBattleEffectDesc(e, getStat, masteryMult, layer, true, fn.type === "被动", fn.isAoE === true))
+    .map(e => resolveGongfaBattleEffectDesc(
+      e, getStat, masteryMult, layer, true, fn.type === "被动", fn.isAoE === true, bvValue, gradeMult, system,
+    ))
     .join("；");
   const lines = [parts];
-  const mp = atLayer(fn.mpCost, layer);
-  if (mp > 0) lines.push(`法力消耗：${mp}`);
+  // 【2026-09-25 v4】目录 mpCost 绝对点数已下线，改由调用方按最大法力百分比给出。
+  if (mpText) lines.push(mpText);
   if (fn.type === "主动") {
     const cd = Math.max(0, (fn.cooldown ?? 0) - cooldownReduce);
     lines.push(`冷却：${cd}回合`);

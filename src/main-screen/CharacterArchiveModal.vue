@@ -26,10 +26,16 @@ import { writeActiveSave } from "../save/gameSave";
 import CharacterProfileModal from "./CharacterProfileModal.vue";
 import NpcDetailModal from "./NpcDetailModal.vue";
 import NpcMiniCard from "./NpcMiniCard.vue";
-import type { Npc } from "../role_core/Npc";
+import { createManualNpc, type Npc } from "../role_core/Npc";
+import type { WorldLocation } from "../role_core/types/worldLocation";
+import type { WorldTime } from "../role_core/worldTime";
 
 const props = defineProps<{
   open: boolean;
+  /** 主角当前所在地点：新建的角色卡默认落在此处并标记为「在场」。 */
+  currentLocation?: WorldLocation | null;
+  /** 当前世界时间：用作新建角色卡的「上次见面时间」（决定出场排序）。 */
+  currentWorldTime?: WorldTime | null;
 }>();
 
 const emit = defineEmits<{
@@ -46,6 +52,14 @@ const detailOpen = ref(false);
  * 导致实例类型不再可赋值给 `Character`。
  */
 const detailTarget = shallowRef<Character | null>(null);
+
+/**
+ * 当前画像弹窗处于哪种模式。
+ *
+ * create 时 `detailTarget` 是一张**尚未入库**的 Npc（`createManualNpc` 造的空白卡），
+ * 点「创建角色卡」才落进 npcStore。
+ */
+const detailMode = ref<"edit" | "create">("edit");
 
 /** 当前打开的 NPC 信息界面（与世界地图点人物卡同一套）。 */
 const npcDetailOpen = ref(false);
@@ -149,6 +163,7 @@ function openDetail(entryIndex: number): void {
   const entry = entries.value[entryIndex];
   if (!entry) return;
   if (entry.isProtagonist) {
+    detailMode.value = "edit";
     detailTarget.value = entry.character;
     detailOpen.value = true;
     return;
@@ -161,8 +176,14 @@ function openDetail(entryIndex: number): void {
 function openProfile(entryIndex: number): void {
   const entry = entries.value[entryIndex];
   if (!entry) return;
+  detailMode.value = "edit";
   detailTarget.value = entry.character;
   detailOpen.value = true;
+}
+
+/** 新建的角色卡已入库：关掉弹窗，列表会自动把它排到「在场」组的最前面。 */
+function onProfileCreated(): void {
+  closeDetail();
 }
 
 function closeNpcDetail(): void {
@@ -170,9 +191,25 @@ function closeNpcDetail(): void {
   npcDetailTarget.value = null;
 }
 
+/**
+ * 「新建角色卡」：造一张空白卡塞进画像弹窗。
+ *
+ * 卡此时**还没入库**（不在 npcStore 里），列表里也看不到它——只有点了「创建角色卡」
+ * 才真正写入。这样「填一半关掉」不会留下一张空卡。
+ */
+function openCreate(): void {
+  detailTarget.value = createManualNpc({
+    location: props.currentLocation ?? null,
+    worldTime: props.currentWorldTime ?? null,
+  });
+  detailMode.value = "create";
+  detailOpen.value = true;
+}
+
 function closeDetail(): void {
   detailOpen.value = false;
   detailTarget.value = null;
+  detailMode.value = "edit";
 }
 
 /** 列表内快速删除 NPC 卡（二次点击确认）。 */
@@ -187,7 +224,9 @@ function onEntryDelete(entryIndex: number): void {
   const npc = entry.character as unknown as { displayName?: string; id?: string };
   clearPendingProfile(entry.key);
   clearPendingNpcBasics(entry.key);
-  npcStore.removeNpc(npc.displayName ?? entry.name);
+  // 主键是 npcId：按 id 删；无 id（理论上只在极端脏数据下）退回按名删。
+  if (npc.id) npcStore.removeNpc(npc.id);
+  else npcStore.removeNpcByName(npc.displayName ?? entry.name);
   writeActiveSave();
   if (detailTarget.value === entry.character) closeDetail();
 }
@@ -258,6 +297,15 @@ onUnmounted(() => {
               点人物查看信息，信息界面内可进「角色设定」编辑性格 / 外貌 / 记忆（回合进行中也可改，回合结束后生效）
             </div>
 
+            <div class="mj-archive-toolbar">
+              <button type="button" class="mj-archive-new-btn" @click="openCreate">
+                ＋ 新建角色卡
+              </button>
+              <span class="mj-archive-toolbar-hint">
+                手动造人：填名字 / 境界 / 简介即可，会落在主角当前地点
+              </span>
+            </div>
+
             <div class="mj-archive-body">
               <div v-if="entries.length === 0" class="mj-archive-empty">
                 暂无可编辑的人物
@@ -286,8 +334,10 @@ onUnmounted(() => {
     <CharacterProfileModal
       :open="detailOpen"
       :character="detailTarget"
+      :mode="detailMode"
       @close="closeDetail"
       @deleted="onProfileDeleted"
+      @created="onProfileCreated"
     />
     <NpcDetailModal
       :open="npcDetailOpen"
@@ -305,6 +355,37 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.mj-archive-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.mj-archive-new-btn {
+  flex: none;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(140, 120, 83, 0.5);
+  background: rgba(140, 120, 83, 0.22);
+  color: #f2e6cf;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.mj-archive-new-btn:hover {
+  background: rgba(140, 120, 83, 0.36);
+  border-color: rgba(198, 166, 116, 0.7);
+}
+
+.mj-archive-toolbar-hint {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.7rem;
+  color: rgba(242, 230, 207, 0.5);
 }
 
 .mj-archive-body {

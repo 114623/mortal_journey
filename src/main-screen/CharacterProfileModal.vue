@@ -16,24 +16,25 @@ import type { Npc } from "../role_core/Npc";
 import { Protagonist } from "../role_core/Protagonist";
 import { Character as CharacterBase } from "../role_core/Character";
 import { npcStore } from "../role_core/npcStore";
+import { resolveNpcId } from "../role_core/npcId";
 import { turnBusy } from "../role_core/turnLock";
 import {
   MEMORY_COMPRESS_TARGET,
   MEMORY_COMPRESS_THRESHOLD,
 } from "../role_core/types/playInfo";
 import {
-  applyNpcBasicsDraft,
+  applyCharacterBasicsDraft,
   applyProfileDraft,
   clearPendingNpcBasics,
   clearPendingProfile,
   getPendingNpcBasics,
   getPendingProfile,
   pendingKeyOf,
-  readNpcBasicsDraft,
+  readCharacterBasicsDraft,
   readProfileDraft,
   setPendingNpcBasics,
   setPendingProfile,
-  type NpcBasicsDraft,
+  type CharacterBasicsDraft,
 } from "../role_core/pendingEdits";
 import { getShouyuanForRealm } from "../role_core/realmUtils";
 import { REALM_ORDER, SUB_STAGES } from "../role_core/types/playInfo";
@@ -48,18 +49,31 @@ const GENDER_OPTIONS = ["男", "女"] as const;
 const props = defineProps<{
   open: boolean;
   character: Character | null;
+  /**
+   * edit=编辑已有角色；create=新建角色卡。
+   *
+   * create 模式下 `character` 是一张**尚未入库**的空白卡（见 `Npc.createManual`），
+   * 点「创建角色卡」才写进 npcStore；编辑路径与待应用队列一概不走——
+   * 队列要靠 npcId / 名字在 store 里反查实例，人还没入库根本查不到。
+   */
+  mode?: "edit" | "create";
 }>();
 
 const emit = defineEmits<{
   close: [];
   /** 该角色已被删除（供调用方清理选中态）。 */
   deleted: [npcId: string];
+  /** create 模式下已成功建卡并入 store（携带最终名字）。 */
+  created: [name: string];
 }>();
 
 const scrollLock = useScrollLock();
 
 /** 回合进行中：改动进队列，回合结束后生效。 */
 const busy = computed(() => turnBusy.value);
+
+/** 是否处于「新建角色卡」模式。 */
+const isCreate = computed(() => props.mode === "create");
 
 const isNpc = computed(
   () => !!props.character && (props.character as unknown as { role?: string }).role === "npc",
@@ -72,10 +86,14 @@ const hasPending = computed(
   () => !!getPendingProfile(pendingKey.value) || !!getPendingNpcBasics(pendingKey.value),
 );
 
-/** 基本信息编辑区（仅 NPC）。 */
-const basics = ref<NpcBasicsDraft | null>(null);
+/**
+ * 基本信息编辑区（主角与 NPC 共用）。
+ *
+ * 主角没有 `identity` 字段，草稿里恒为空串、模板里也不渲染那一行。
+ */
+const basics = ref<CharacterBasicsDraft | null>(null);
 /** 基本信息对照基线。 */
-const basicsBaseline = ref<NpcBasicsDraft | null>(null);
+const basicsBaseline = ref<CharacterBasicsDraft | null>(null);
 /** 删除确认（二次点击才真正删除）。 */
 const confirmDelete = ref(false);
 
@@ -153,14 +171,9 @@ function syncDraft(): void {
   memory.value = draft.memory;
   aiMaintained.value = draft.source !== "manual";
 
-  if (isNpc.value) {
-    const b = getPendingNpcBasics(pendingKey.value) ?? readNpcBasicsDraft(c as Npc);
-    basics.value = { ...b, linggen: [...b.linggen] };
-    basicsBaseline.value = { ...b, linggen: [...b.linggen] };
-  } else {
-    basics.value = null;
-    basicsBaseline.value = null;
-  }
+  const b = getPendingNpcBasics(pendingKey.value) ?? readCharacterBasicsDraft(c);
+  basics.value = { ...b, linggen: [...b.linggen] };
+  basicsBaseline.value = { ...b, linggen: [...b.linggen] };
   confirmDelete.value = false;
   savedHint.value = "";
 }
@@ -191,15 +204,83 @@ function persist(c: Character): void {
   writeActiveSave();
 }
 
+/**
+ * 新建角色卡：把当前表单内容直接写进一张尚未入库的 NPC 实例，再塞进 npcStore。
+ *
+ * 不走「待应用队列」——队列是用 npcId 反查实例的（见 `pendingEdits.resolveCharacter`），
+ * 这张卡还没有 id 对应的 store 记录，进队列等于丢。回合进行中也能直接建：
+ * 本回合的 NPC 快照在回合开始时就发给 AI 了，AI 无从输出这个人的任何改动，
+ * 不存在「被 AI 覆盖」的问题。
+ */
+function createNpc(b: CharacterBasicsDraft): void {
+  const c = props.character as Npc | null;
+  if (!c) return;
+
+  const name = b.displayName.trim();
+  if (!name) {
+    savedHint.value = "请先填写名字。";
+    return;
+  }
+  // store 主键是 npcId：同名不同人是合法剧情（以 id 区分），重名不再拦截创建。
+
+  // 主键唯一性：手动建卡的 id 由（地点|名字|身份）确定性合成——同名同地点会撞出
+  // 同一个 id，落库时顶掉已有卡。撞车时按「身份#序号」重新合成，各占一格。
+  const npc = c as Npc;
+  if (npcStore.getNpcById(npc.id)) {
+    let seq = 2;
+    let candidate = resolveNpcId(undefined, name, `#${seq}`, npc.currentLocation);
+    while (npcStore.getNpcById(candidate)) {
+      seq += 1;
+      candidate = resolveNpcId(undefined, name, `#${seq}`, npc.currentLocation);
+    }
+    npc.id = candidate;
+  }
+
+  applyCharacterBasicsDraft(c, { ...b, displayName: name, linggen: [...b.linggen] });
+  applyProfileDraft(c, {
+    personality: personality.value.trim(),
+    appearance: appearance.value.trim(),
+    memory: memory.value.trim(),
+    source: aiMaintained.value ? "ai" : "manual",
+  });
+  persist(c);
+
+  baseline.value = {
+    personality: personality.value.trim(),
+    appearance: appearance.value.trim(),
+    memory: memory.value.trim(),
+    source: aiMaintained.value ? "ai" : "manual",
+  };
+  savedHint.value = `已创建角色卡「${name}」。`;
+  emit("created", name);
+  emit("close");
+}
+
 function onSave(): void {
   const c = props.character;
   if (!c) return;
 
-  // ── 基本信息（仅 NPC）──
+  // 新建模式：所有字段（含基本信息）一律直接落库，不判 dirty、不进队列。
+  if (isCreate.value) {
+    if (basics.value) createNpc(basics.value);
+    return;
+  }
+
+  // ── 基本信息（主角与 NPC 共用）──
   const b = basics.value;
   let basicsChanged = false;
-  if (isNpc.value && b) {
-    const appliedB = readNpcBasicsDraft(c as Npc);
+  if (b) {
+    // 名字校验：空名一律挡下；主角改名与已有 NPC 重名只提示不拦截
+    // （同名不同人以 npcId 区分，战斗链按 id 回查，不会认错人）。
+    const name = b.displayName.trim();
+    if (!name) {
+      savedHint.value = "请先填写名字。";
+      return;
+    }
+    if (!isNpc.value && npcStore.getNpc(name)) {
+      savedHint.value = `提示：已存在同名 NPC「${name}」，二者以 id 区分，不影响使用。`;
+    }
+    const appliedB = readCharacterBasicsDraft(c);
     basicsChanged =
       b.displayName !== appliedB.displayName ||
       b.gender !== appliedB.gender ||
@@ -209,13 +290,14 @@ function onSave(): void {
       b.realmMinor !== appliedB.realmMinor ||
       b.linggen.join("") !== appliedB.linggen.join("") ||
       b.identity !== appliedB.identity;
-    const bDraft: NpcBasicsDraft = { ...b, linggen: [...b.linggen] };
+    const bDraft: CharacterBasicsDraft = { ...b, displayName: name, linggen: [...b.linggen] };
     if (busy.value) {
       if (basicsChanged) setPendingNpcBasics(pendingKey.value, bDraft);
     } else {
-      if (basicsChanged) applyNpcBasicsDraft(c as Npc, bDraft);
+      if (basicsChanged) applyCharacterBasicsDraft(c, bDraft);
       clearPendingNpcBasics(pendingKey.value);
     }
+    basics.value = { ...bDraft, linggen: [...bDraft.linggen] };
     basicsBaseline.value = { ...bDraft, linggen: [...bDraft.linggen] };
   }
 
@@ -299,10 +381,9 @@ function onDelete(): void {
     return;
   }
   const id = npc.id;
-  const name = npc.displayName;
   clearPendingProfile(pendingKey.value);
   clearPendingNpcBasics(pendingKey.value);
-  npcStore.removeNpc(name);
+  npcStore.removeNpc(id);
   writeActiveSave();
   emit("deleted", id);
   emit("close");
@@ -363,10 +444,16 @@ onUnmounted(() => {
             <button type="button" class="mj-trait-modal-close" aria-label="关闭" @click="onCloseClick">
               ×
             </button>
-            <h4 class="mj-trait-modal-title">角色设定 · {{ character.displayName }}</h4>
+            <h4 class="mj-trait-modal-title">
+              {{ isCreate ? '新建角色卡' : `角色设定 · ${character.displayName}` }}
+            </h4>
             <div class="mj-trait-modal-rarity">{{ subtitle }}</div>
 
-            <p v-if="busy" class="mj-profile-locked">
+            <p v-if="isCreate" class="mj-profile-locked mj-profile-locked--pending">
+              填好基本信息后点「创建角色卡」即入库；<b>默认锁定为玩家设定</b>（AI 不会改写），
+              想让 AI 继续维护就把下面的「允许 AI 自动更新」勾上。
+            </p>
+            <p v-else-if="busy" class="mj-profile-locked">
               回合进行中：可以随时改，点「保存」后进入队列，<b>本回合结束后</b>才生效。
             </p>
             <p v-else-if="hasPending" class="mj-profile-locked mj-profile-locked--pending">
@@ -374,7 +461,7 @@ onUnmounted(() => {
             </p>
 
             <div class="mj-profile-body">
-              <!-- 基本信息（仅 NPC） -->
+              <!-- 基本信息（主角与 NPC 共用；「简介」是 NPC 专属） -->
               <div v-if="basics" class="mj-profile-basics">
                 <div class="mj-profile-basics-title">基本信息</div>
 
@@ -384,7 +471,7 @@ onUnmounted(() => {
                 </div>
 
                 <!-- 名字下面那行简介（显示为「身份 · 境界」）的可编辑部分 -->
-                <div class="mj-profile-row">
+                <div v-if="isNpc" class="mj-profile-row">
                   <label class="mj-profile-row-k" title="角色卡与信息界面里名字下面那行简介">简介</label>
                   <input
                     v-model="basics.identity"
@@ -442,6 +529,9 @@ onUnmounted(() => {
 
                 <p class="mj-profile-note">
                   改境界会按境界表重算属性与气血上限，并把寿元设为该境界的默认值（可再手改）。
+                  <template v-if="isNpc">功法层数也会按新境界重算。</template>
+                  <template v-else>主角的<b>修为会归零</b>、气血法力回满，突破状态一并清掉。</template>
+                  灵根为空即无灵根——感应不到天地灵气，境界锁死在凡人后期，无法突破到练气。
                 </p>
               </div>
 
@@ -505,7 +595,7 @@ onUnmounted(() => {
 
             <div class="mj-item-detail-actions">
               <button
-                v-if="isNpc"
+                v-if="isNpc && !isCreate"
                 type="button"
                 class="mj-item-detail-action-btn mj-item-detail-action-btn--danger"
                 @click="onDelete"
@@ -516,7 +606,7 @@ onUnmounted(() => {
                 清空
               </button>
               <button
-                v-if="hasPending"
+                v-if="hasPending && !isCreate"
                 type="button"
                 class="mj-item-detail-action-btn"
                 @click="onDiscardPending"
@@ -528,7 +618,7 @@ onUnmounted(() => {
                 class="mj-item-detail-action-btn mj-item-detail-action-btn--primary"
                 @click="onSave"
               >
-                {{ busy ? '保存（回合结束后生效）' : '保存' }}
+                {{ isCreate ? '创建角色卡' : busy ? '保存（回合结束后生效）' : '保存' }}
               </button>
             </div>
             <p v-if="dirty && !savedHint" class="mj-profile-dirty-hint">有未保存的修改。</p>

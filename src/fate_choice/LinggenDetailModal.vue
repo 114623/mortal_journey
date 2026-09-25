@@ -14,9 +14,16 @@ const emit = defineEmits<{
 }>();
 
 const cultivationSpeed = computed(() => {
-  const mult = LINGGEN_CULTIVATION_MULT[props.elements.length] ?? 0.5;
+  const mult = LINGGEN_CULTIVATION_MULT[props.elements.length] ?? 0.2;
   return Math.round(mult * 100) + "%";
 });
+
+/** 无灵根硬锁提示：无灵根者一辈子出不了凡人。 */
+const mortalLockNote = computed(() =>
+  props.elements.length === 0
+    ? "无灵根者感应不到天地灵气，无法引气入体——修为可积满，但境界终其一生锁死在凡人后期。"
+    : "",
+);
 
 const effectEntries = computed(() =>
   props.elements.map((el) => ({ element: el, effect: LINGGEN_ELEMENT_EFFECTS[el] ?? "未知效果" })),
@@ -46,6 +53,10 @@ const effectEntries = computed(() =>
             <div class="mj-trait-modal-section">
               <span class="mj-trait-modal-k">修炼速度</span>
               <div class="mj-trait-modal-v">{{ cultivationSpeed }}</div>
+            </div>
+            <div v-if="mortalLockNote" class="mj-trait-modal-section">
+              <span class="mj-trait-modal-k">修行上限</span>
+              <div class="mj-trait-modal-v" style="color: var(--mj-danger, #c62828)">{{ mortalLockNote }}</div>
             </div>
           </div>
         </div>

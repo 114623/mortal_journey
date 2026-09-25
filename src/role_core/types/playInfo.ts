@@ -15,6 +15,7 @@ import type {
 } from "./itemInfo";
 import type { WorldLocation } from "./worldLocation";
 import type { WorldTime } from "../worldTime";
+import type { CharacterBuff } from "./characterBuff";
 
 import {
   REALM_PRIMARY_STATS_TABLE,
@@ -269,6 +270,8 @@ export interface CharacterPlayInfoCommon {
   gongfaSlots: GongfaSlotsState;
   equippedSlots: EquippedSlotsState;
   elixirBonuses?: Record<string, number>;
+  /** 角色持久增益/减益（跨战斗、进存档）。老存档缺省为空数组。 */
+  buffs?: CharacterBuff[];
   /** 角色画像提示词（性格/外貌/记忆）。旧存档缺省为空画像。 */
   profile?: CharacterProfile;
 }

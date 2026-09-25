@@ -24,6 +24,7 @@ import {
   compactInventorySlotsInPlace,
 } from "./CharacterInventory";
 import { applyLinggenElixirBoost } from "./types/elixir";
+import { hasLinggen } from "./realmUtils";
 import { gameLog } from "../log/gameLog";
 
 /** 境界突破（含小境界推进）。 */
@@ -133,6 +134,16 @@ function removeFromInventoryByName(npc: Npc, name: string, count: number): void 
 export function applyCoreChange(npc: Npc, event: NpcCoreChangeEvent, linggen?: string[]): void {
   switch (event.kind) {
     case "realm_breakthrough": {
+      // 硬锁：无灵根者无法引气入体，一辈子出不了凡人。凡人内部的后期→前期推进不受限。
+      if (npc.realm.major === "凡人"
+        && event.newRealm.major !== "凡人"
+        && !hasLinggen(npc.linggen)) {
+        console.warn(
+          `[npcCoreChange] 「${npc.displayName}」无灵根，拒绝突破出凡人：`
+          + `${npc.realm.major}${npc.realm.minor} → ${event.newRealm.major}${event.newRealm.minor}`,
+        );
+        break;
+      }
       npc.setRealm(event.newRealm.major, event.newRealm.minor);
       const { maxHp, maxMp } = npc.computeMaxHpMp();
       npc.setMaxHpMp(maxHp, maxMp);

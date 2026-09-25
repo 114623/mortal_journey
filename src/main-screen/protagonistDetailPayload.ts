@@ -17,12 +17,37 @@ import type { CultivationRealm, EquipSlotKey, PrimaryStatKey, TraitEntry } from 
 import { PRIMARY_STAT_KEY_TO_ZH } from "../role_core/types/playInfo";
 import type { TreasureSpecialEffect, TreasureConversion, TreasureConversionEffect } from "../role_core/types/treasure";
 import { TREASURE_MODIFIER_NAMES } from "../role_core/types/treasure";
-import { resolveItemTier, tierLabel, describeTierSuppression, describeElixirTierSuppression, applyElixirTierSuppression } from "../role_core/types/itemTier";
-import type { GongfaSpecialEffect } from "../role_core/types/gongfa";
-import { resolveGongfaEffectDisplay, resolveGongfaLayer10 } from "../role_core/types/gongfa";
+import {
+  resolveItemTier,
+  tierLabel,
+  describeTierSuppression,
+  describeElixirTierSuppression,
+  applyElixirTierSuppression,
+  gongfaTierFactor,
+  treasureTierFactor,
+} from "../role_core/types/itemTier";
+import {
+  elixirRealmScale,
+  gongfaBvValue,
+  gongfaLayerValue,
+  gongfaTypicalValue,
+} from "../role_core/realmScale";
+import type { GongfaSpecialEffect, GongfaSystem } from "../role_core/types/gongfa";
+import {
+  resolveGongfaEffectDisplay,
+  gradeSkillSrMult,
+  gongfaMpPct,
+  gongfaMpCost,
+} from "../role_core/types/gongfa";
 import { gradeToTraitRarity, getGongfaMasteryProgress } from "./protagonistPanelDisplay";
 import { getItemSellPrice } from "../role_core/types/gameConstants";
-import { gongfaCombatMult, gongfaAttriMultOf, gongfaMaxLayerOf, clampGongfaMastery } from "../role_core/realmUtils";
+import {
+  gongfaCombatMultAt,
+  gongfaContLayer,
+  gongfaLayer10At,
+  gongfaMaxLayerOf,
+  clampGongfaMastery,
+} from "../role_core/realmUtils";
 import { protagonist } from "../role_core/Protagonist";
 import type { ItemGrade } from "../role_core/types/itemInfo";
 import { describeTraitEffect } from "../fate_choice/traitEffect";
@@ -46,11 +71,15 @@ function pushSpecialEffectSection(
   _grade: string,
   _primaryStatGetter?: () => number,
   _statNameGetter?: () => string,
-  _system?: string,
+  system?: string,
   derivedStatsGetter?: () => DerivedStatValues,
   mastery?: number,
   cooldownReduce?: number,
   maxLayer: number = 10,
+  bvValue: number = 0,
+  contLayer: number = 1,
+  gradeMult: number = 1,
+  mpText: string = "",
 ): void {
   if (!fn) return;
   out.push({
@@ -62,12 +91,14 @@ function pushSpecialEffectSection(
           if (!ds) return 0;
           return (ds as unknown as Record<string, number>)[key] ?? 0;
         };
-        // 战斗倍率按修炼进度比例插值，层号映射到 10 层基准曲线的连续位置。
-        const masteryMult = mastery != null && mastery >= 1
-          ? gongfaCombatMult(clampGongfaMastery(mastery, maxLayer), maxLayer)
-          : 1.0;
-        const layer10 = resolveGongfaLayer10(clampGongfaMastery(mastery ?? 1, maxLayer), maxLayer);
-        return resolveGongfaEffectDisplay(fn, getStat, masteryMult, layer10, cooldownReduce ?? 0);
+        // 【2026-09-25 v4】战斗倍率与目录取样都走**连续层号**，口径与 battleInit 一致：
+        // 层内经验立刻反映在面板数字上，层数退化为里程碑。
+        const masteryMult = gongfaCombatMultAt(contLayer);
+        const layer10 = gongfaLayer10At(contLayer);
+        return resolveGongfaEffectDisplay(
+          fn, getStat, masteryMult, layer10, cooldownReduce ?? 0, bvValue, gradeMult, mpText,
+          system as GongfaSystem | undefined,
+        );
       }
       if ("modifiers" in fn) {
         const tFn = fn as TreasureSpecialEffect;
@@ -108,22 +139,42 @@ function formatTreasureConversion(c: TreasureConversion): string {
 }
 
 /**
- * 追加法宝「属性加成」段落（原 modifiers 战斗修正展示）。
+ * 追加法宝「属性加成」段落（百分比词条的战斗修正）。
+ *
+ * 被跨阶压制时会在每条后面补一个「实装 N%」——`modifiers` 里存的是**标称值**，
+ * 实际注入战斗引擎的是乘过 `treasureTierFactor` 之后的值（见
+ * `battleInit.extractTreasurePassiveEffects`），不标出来会让玩家高估手里的装备。
  *
  * @param out 段落数组（原地修改）。
  * @param fn 法宝 function；为空则不追加。
+ * @param tier 法宝阶层。
+ * @param realmMajor 查看者当前大境界；缺省则不展示实装值。
  */
 function pushTreasureAttributeBonusSection(
   out: ProtagonistDetailSection[],
   fn: TreasureSpecialEffect | undefined,
+  tier?: string | null,
+  realmMajor?: string | null,
 ): void {
   if (!fn) return;
+  const f = realmMajor ? treasureTierFactor(tier, realmMajor) : 1;
+  const suppressed = f > 0 && f < 1;
   out.push({
     label: "属性加成",
     text: fn.modifiers
-      .map(m => `${TREASURE_MODIFIER_NAMES[m.modifierType]}+${m.value}%`)
+      .map((m) => {
+        const base = `${TREASURE_MODIFIER_NAMES[m.modifierType]}+${m.value}%`;
+        if (!suppressed) return base;
+        return `${base}（实装 +${formatPct(m.value * f)}%）`;
+      })
       .join("\n"),
   });
+}
+
+/** 百分比取值格式化：保留 1 位小数并去掉多余的 0（与战斗引擎的取整口径一致）。 */
+function formatPct(v: number): string {
+  const r = Math.round(v * 10) / 10;
+  return String(r);
 }
 
 /**
@@ -135,10 +186,19 @@ function pushTreasureAttributeBonusSection(
 function pushTreasureSpecialEffectSection(
   out: ProtagonistDetailSection[],
   se: TreasureConversionEffect | undefined,
+  tier?: string | null,
+  realmMajor?: string | null,
 ): void {
   if (!se) return;
+  const f = realmMajor ? treasureTierFactor(tier, realmMajor) : 1;
+  const suppressed = f > 0 && f < 1;
   const lines: string[] = [];
-  for (const c of se.conversions) lines.push(formatTreasureConversion(c));
+  for (const c of se.conversions) {
+    const base = formatTreasureConversion(c);
+    if (!base) continue;
+    // 转换比率同样受跨阶压制（`Character.collectEquippedConversions` 里先乘再应用）。
+    lines.push(suppressed ? `${base}（实装 ${formatPct(c.ratio * f)}%）` : base);
+  }
   out.push({ label: "特殊效果", text: lines.filter(Boolean).join("\n") });
 }
 
@@ -250,17 +310,27 @@ function pushSec(out: ProtagonistDetailSection[], label: string, text: string | 
  */
 function formatZhBonusWithMastery(
   gf: GongfaItemDefinition,
+  realmMajor?: string | null,
+  realmMinor?: string | null,
 ): string | undefined {
   const b = gf.bonus as Record<string, number> | undefined;
   if (!b || typeof b !== "object") return undefined;
-  const masteryMult = gongfaAttriMultOf(gf);
-  const parts = Object.entries(b).map(([k, v]) => {
-    if (typeof v === "number" && !Number.isFinite(v)) return null;
-    const raw = typeof v === "number" ? v : 0;
-    const val = Math.trunc(raw * masteryMult);
-    const sign = val >= 0 ? "+" : "";
-    let line = `${k} ${sign}${val}`;
-    return line;
+  // 口径必须与 `Character.collectPrimaryBonuses` **逐字一致**（v4 层号锚定）：
+  // 连续层号 → gongfaLayerValue，品阶由 roll ÷ 极品中值体现。
+  const contLayer = gongfaContLayer(gf);
+  const tierF = gongfaTierFactor(gf.tier, realmMajor);
+  // v4 下仅凡人 tier 会被压制（练气及以上恒 1），故标注自然只在凡人武功上出现。
+  const suppressed = tierF > 0 && tierF < 1;
+  const isMortal = gf.tier === "凡人";
+  const parts = Object.entries(b).map(([zh, v]) => {
+    if (typeof v !== "number" || !Number.isFinite(v)) return null;
+    const add = isMortal
+      ? v * 2.0
+      : (v / Math.max(1, gongfaTypicalValue(zh))) * gongfaLayerValue(zh, contLayer);
+    const val = Math.max(1, Math.trunc(add * tierF));
+    return suppressed
+      ? `${zh} +${val}（跨阶压制 ${Math.round(tierF * 100)}%）`
+      : `${zh} +${val}`;
   }).filter(Boolean) as string[];
   return parts.length ? parts.join("；") : undefined;
 }
@@ -356,8 +426,8 @@ export function buildWearableDetailPayload(
   pushSec(sections, "品级", it.grade);
   const tier = resolveItemTier(it.tier, it.grade);
   pushSec(sections, "阶层", describeTierSuppression(tier, realm?.major));
-  pushTreasureAttributeBonusSection(sections, it.function);
-  pushTreasureSpecialEffectSection(sections, it.specialEffect);
+  pushTreasureAttributeBonusSection(sections, it.function, tier, realm?.major);
+  pushTreasureSpecialEffectSection(sections, it.specialEffect, tier, realm?.major);
 
   const actions: ProtagonistDetailActionButton[] = [];
   if (source?.type === "equipped") {
@@ -408,15 +478,22 @@ export function buildGongfaDetailPayload(
   statNameGetter?: () => string,
   derivedStatsGetter?: () => DerivedStatValues,
   cooldownReduce: number = 0,
+  realm?: CultivationRealm | null,
 ): ProtagonistDetailPayload {
   const sections: ProtagonistDetailSection[] = [];
   pushSec(sections, "简介", gf.desc);
   pushSec(sections, "品级", gf.grade);
-  // 阶层：决定数值量级、跨阶压制与**层数上限**，是功法最核心的定位信息。
+  // 【2026-09-25 v4】阶层对功法**只决定能修到第几层**，不再有威力折损系数，
+  // 故这里不再借用法宝那套「威能 xx%」的措辞（机制上不存在，说了是误导）。
+  // 凡人 tier 是唯一例外（凡俗之物不入修行：练气期 40%、筑基起 0），保留压制提示。
   {
-    // 2026-09-21：原「已不入流 · 修炼不再增进修为」提示已随该机制一并移除，
-    // 阶层现在只反映数值量级、跨阶压制与层数上限。
-    pushSec(sections, "阶层", gf.tier ? tierLabel(gf.tier) : "未定");
+    const maxL = gongfaMaxLayerOf(gf);
+    let tierText = gf.tier ? `${tierLabel(gf.tier)} · 至多${maxL}层` : "未定";
+    const tierF = gf.tier ? gongfaTierFactor(gf.tier, realm?.major) : 1;
+    if (tierF > 0 && tierF < 1) {
+      tierText += `（凡俗之物·威能 ${Math.round(tierF * 100)}%）`;
+    }
+    pushSec(sections, "阶层", tierText);
   }
   const maxLayer = gongfaMaxLayerOf(gf);
   {
@@ -436,9 +513,23 @@ export function buildGongfaDetailPayload(
     sections.push(section);
   }
   const mastery = gf.mastery ?? 1;
-  const bonus = formatZhBonusWithMastery(gf);
+  const bonus = formatZhBonusWithMastery(gf, realm?.major, realm?.minor);
   if (bonus) pushSec(sections, "修炼加成", bonus);
-  pushSpecialEffectSection(sections, gf.function, gf.grade, primaryStatGetter, statNameGetter, gf.system, derivedStatsGetter, mastery, cooldownReduce, maxLayer);
+  // 【2026-09-25】技能侧（与 battleInit 逐字一致）：
+  // 绝对点数的底盘走**层号曲线**（同层同值，不看使用者境界）；
+  // 属性项用施法者实时面板 × 品阶系数（堆属性有反馈）。
+  const bvValue = gongfaBvValue(gongfaContLayer(gf));
+  const contLayer = gongfaContLayer(gf);
+  const gradeMult = gradeSkillSrMult(gf.grade);
+  // 蓝耗按「占自身最大法力百分比」现算（目录 mpCost 已下线）。
+  const mpPct = gongfaMpPct(gf.grade, contLayer);
+  const mpNow = gongfaMpCost(protagonist.value?.maxMp ?? 0, mpPct);
+  const mpText = mpNow > 0 ? `法力消耗：${mpNow}（${mpPct.toFixed(0)}% 最大法力）` : "";
+  pushSpecialEffectSection(
+    sections, gf.function, gf.grade, primaryStatGetter, statNameGetter, gf.system,
+    derivedStatsGetter, mastery, cooldownReduce, maxLayer,
+    bvValue, contLayer, gradeMult, mpText,
+  );
   if (gf.inheritFrom) pushSec(sections, "承继", `承「${gf.inheritFrom}」之根基`);
 
   const actions: ProtagonistDetailActionButton[] = [];
@@ -492,12 +583,29 @@ function formatElixirEffect(el: ElixirItemDefinition): string {
  * @param realmMajor 查看者当前大境界；为空表示不计算衰减。
  * @returns 已衰减时返回 `「实际药力 6」`，同阶时返回空串（避免冗余）。
  */
-function formatElixirEffective(el: ElixirItemDefinition, realmMajor?: string): string {
+function formatElixirEffective(
+  el: ElixirItemDefinition,
+  realmMajor?: string,
+  realmMinor?: string,
+): string {
   if (!realmMajor) return "";
   const tier = resolveItemTier(el.tier, el.grade);
-  const actual = applyElixirTierSuppression(el.effects.value, tier, realmMajor);
-  if (actual >= el.effects.value) return "";
-  return `实际药力 ${actual}${el.effects.isPercent ? "%" : ""}`;
+  const suppressed = applyElixirTierSuppression(el.effects.value, tier, realmMajor);
+  const suffix = el.effects.isPercent ? "%" : "";
+  // 定值型还要乘境界缩放，否则化神期吃「+30 劲力」等于没吃。百分比型跳过。
+  const actual = el.effects.isPercent
+    ? suppressed
+    : Math.max(1, Math.round(suppressed * elixirRealmScale(el.effectType, realmMajor, realmMinor)));
+  const parts: string[] = [];
+  if (suppressed < el.effects.value) {
+    parts.push(`跨阶衰减后 ${suppressed}${suffix}`);
+  }
+  if (actual !== suppressed) {
+    parts.push(`实得 ${actual}${suffix}`);
+  }
+  if (!parts.length) return "";
+  // 口径必须与 `Protagonist.consumeElixir` 一致：先衰减、再境界缩放。
+  return parts.join(" · ");
 }
 
 /**
@@ -517,7 +625,9 @@ export function buildInventoryStackDetailPayload(
   derivedStatsGetterForGongfa?: (gf: GongfaItemDefinition) => DerivedStatValues,
   cooldownReduce: number = 0,
   realmMajor?: string,
+  realmMinor?: string,
 ): ProtagonistDetailPayload {
+  const realmForItem = realmMajor ? { major: realmMajor, minor: realmMinor ?? "" } : null;
   if (!("itemType" in cell)) {
     const st = cell as SpiritStoneInventoryStack;
     const sections: ProtagonistDetailSection[] = [];
@@ -537,7 +647,7 @@ export function buildInventoryStackDetailPayload(
       payload = buildWearableDetailPayload(
         it,
         bagIndex != null ? { type: "bag", inventoryIndex: bagIndex } : undefined,
-        realmMajor ? { major: realmMajor, minor: "" } : null,
+        realmForItem,
       );
       break;
     case "功法": {
@@ -559,6 +669,7 @@ export function buildInventoryStackDetailPayload(
         sng,
         dsg,
         cooldownReduce,
+        realmForItem,
       );
       break;
     }
@@ -570,7 +681,7 @@ export function buildInventoryStackDetailPayload(
       pushSec(sections, "品级", pill.grade);
       pushSec(sections, "阶层", describeElixirTierSuppression(pillTier, realmMajor));
       pushSec(sections, "药效", formatElixirEffect(pill));
-      pushSec(sections, "当前境界药力", formatElixirEffective(pill, realmMajor));
+      pushSec(sections, "当前境界药力", formatElixirEffective(pill, realmMajor, realmMinor));
       pushSec(sections, "数量", pill.count);
       const actions: ProtagonistDetailActionButton[] = [];
       if (bagIndex != null && pill.count > 0) {

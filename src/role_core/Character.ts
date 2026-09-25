@@ -22,9 +22,10 @@ import {
 } from "./types/playInfo";
 import {
   getRealmPrimaryStats,
-  gongfaAttriMultOf,
+  gongfaContLayer,
   inheritGongfaProgress,
 } from "./realmUtils";
+import { gongfaLayerValue, gongfaTypicalValue, finalizeZhBonus } from "./realmScale";
 import type { SpiritStoneName } from "./types/spiritStone";
 import {
   DEFAULT_INVENTORY_SLOT_COUNT,
@@ -47,7 +48,10 @@ import {
 import { applyLinggenElixirBoost } from "./types/elixir";
 import { applyStatConversions, applyResourceConversions, type TreasureConversion } from "./types/treasure";
 import { treasureTierFactor, resolveItemTier, gongfaTierFactor, ensureGongfaTier } from "./types/itemTier";
-import { guardMemoryUpdate, splitMemoryEntries } from "./memoryLog";
+import { guardMemoryUpdate, splitMemoryEntries, stripMemoryJsonShell } from "./memoryLog";
+import type { WorldTime } from "./worldTime";
+import type { CharacterBuff } from "./types/characterBuff";
+import { normalizeBuffs, pruneExpiredBuffs, sumBuffResourcePct } from "./types/characterBuff";
 import { gameLog } from "../log/gameLog";
 
 const HP_PER_PHYSIQUE = 10;
@@ -125,6 +129,13 @@ export class Character {
   gongfaSlots: GongfaSlotsState;
   inventorySlots: Array<InventoryStackItem | null>;
   elixirBonuses: Record<string, number>;
+  /**
+   * 角色持久增益/减益（跨战斗、进存档），如重伤后的「气血亏虚」。
+   *
+   * 到期判定需要「当前世界时间」，由外部调 {@link pruneBuffs} 触发，
+   * 角色层不反向依赖 storyStore（避免模块环）。
+   */
+  buffs: CharacterBuff[];
   /** 角色画像提示词（性格/外貌/记忆），NPC 由 AI 生成、主角由玩家填写。 */
   profile: CharacterProfile;
 
@@ -147,7 +158,33 @@ export class Character {
     this.gongfaSlots = data.gongfaSlots;
     this.inventorySlots = data.inventorySlots;
     this.elixirBonuses = data.elixirBonuses ? { ...data.elixirBonuses } : {};
+    this.buffs = normalizeBuffs(data.buffs);
     this.profile = normalizeProfile(data.profile);
+  }
+
+  // ===================================================================
+  // 持久 buff（跨战斗）
+  // ===================================================================
+
+  /**
+   * 按当前世界时间剔除已过期的 buff。
+   *
+   * 应在推进回合 / 战斗结算 / 打开面板等持有 worldTime 的地方调用；
+   * 角色层自己拿不到 now，故不做惰性清理。
+   *
+   * @returns 被剔除的条数（0 表示无变化）。
+   */
+  pruneBuffs(now: WorldTime | null | undefined): number {
+    if (!now || this.buffs.length === 0) return 0;
+    const { kept, removed } = pruneExpiredBuffs(this.buffs, now);
+    if (removed.length === 0) return 0;
+    this.buffs = kept;
+    return removed.length;
+  }
+
+  /** 当前 buff 对血/法上限的合计百分点（-30 表示上限打七折）。 */
+  buffResourcePct(): { maxHpPct: number; maxMpPct: number } {
+    return sumBuffResourcePct(this.buffs);
   }
 
   // ===================================================================
@@ -203,21 +240,30 @@ export class Character {
     for (const k of PRIMARY_STAT_KEYS) {
       primaryStats[k] = base[k] ?? 0;
     }
+    // 功法加成改为「先浮点累加、最后统一取整」：
+    // 原先每条功法各自 trunc，多件小幅加成的截断误差会累积（低数值甚至被截成 0），
+    // 统一取整并保底 1 之后，装了就一定有效果。
+    const gongfaAcc: Record<string, number> = {};
     for (const gf of this.gongfaSlots) {
       if (!gf) continue;
-      const mastery = gf.mastery ?? 1;
-      // 倍率按「修炼进度比例」在 [1, 阶层封顶] 之间插值——层数上限由阶层决定。
-      const masteryMult = gongfaAttriMultOf(gf);
-      // 功法阶层压制：低阶功法被高阶修士修习时加成衰减（凡人武功在练气期只剩一成）。
+      // 【2026-09-25 v4】加成由**连续层号**唯一决定（同层同值，与功法阶层无关），
+      // 阶层唯一的作用是通过 gongfaMaxLayerOf 决定这功法能修到第几层。
+      // 连续层号让层内经验立刻反映到面板，层数退化为纯里程碑。
+      const contLayer = gongfaContLayer(gf);
+      // 仅凡人 tier 保留衰减（凡俗之物不入修行：练气期 40%、筑基起归零），
+      // 练气及以上恒为 1——自然淘汰靠「绝对值固定 + 境界基准上涨」实现。
       const tierF = gongfaTierFactor(gf.tier, this.realm.major);
-      const adjusted: Record<string, number> = {};
-      for (const [k, v] of Object.entries(gf.bonus as Record<string, number>)) {
-        if (typeof v === "number" && Number.isFinite(v)) {
-          adjusted[k] = Math.trunc(v * masteryMult * tierF);
-        }
+      const isMortal = gf.tier === "凡人";
+      for (const [zh, v] of Object.entries(gf.bonus as Record<string, number>)) {
+        if (typeof v !== "number" || !Number.isFinite(v)) continue;
+        // 凡人武功论外：保持旧口径「原始词条值 × 2.0」，不查层号曲线。
+        const add = isMortal
+          ? v * 2.0
+          : (v / Math.max(1, gongfaTypicalValue(zh))) * gongfaLayerValue(zh, contLayer);
+        gongfaAcc[zh] = (gongfaAcc[zh] ?? 0) + add * tierF;
       }
-      Character.addZhItemBonusInto(primaryStats, adjusted);
     }
+    Character.addZhItemBonusInto(primaryStats, finalizeZhBonus(gongfaAcc));
     for (const [k, v] of Object.entries(this.elixirBonuses)) {
       if (typeof v === "number" && v !== 0) primaryStats[k] = (primaryStats[k] ?? 0) + v;
     }
@@ -266,6 +312,11 @@ export class Character {
     const baseMp = realmRow?.mp ?? 100;
     let maxHp = Math.max(1, Math.round((baseHp + stats.physique * HP_PER_PHYSIQUE) * (1 + stats.physique / 1000)));
     let maxMp = Math.max(1, Math.round((baseMp + stats.spirit * MP_PER_SPIRIT) * (1 + stats.spirit / 1000)));
+    // 持久 buff 的血/法上限增减（如重伤后的「气血亏虚 −30%」）。
+    // 注意在资源转换**之前**应用：转换读的是「受伤后的上限」，符合直觉。
+    const bp = this.buffResourcePct();
+    if (bp.maxHpPct !== 0) maxHp = Math.max(1, Math.round(maxHp * (1 + bp.maxHpPct / 100)));
+    if (bp.maxMpPct !== 0) maxMp = Math.max(1, Math.round(maxMp * (1 + bp.maxMpPct / 100)));
     // 法宝特殊效果：血量/法力上限转换（仅仙品/神品法宝生效）
     const resConversions = this.collectEquippedConversions().filter(c => c.target === "mpToHp" || c.target === "hpToMp");
     if (resConversions.length > 0) {
@@ -371,6 +422,28 @@ export class Character {
   }
 
   /**
+   * 就地自愈「记忆被存成 JSON 外壳」的老存档。
+   *
+   * 历史版本曾把主角记忆写成 `{"full":…,"entries":[…]}`，这种文本进入「只追加」
+   * 逻辑后会被当成一条旧条目，每轮整份再复制一遍，越滚越大且无法解析
+   * （详见 {@link stripMemoryJsonShell} 的文档）。读写记忆前先调一次即可修好，
+   * 不需要额外的存档迁移脚本。
+   *
+   * @returns 是否做了剥离（true 时 `profile.memory` 已被就地改写）。
+   */
+  private healMemoryJsonShell(): boolean {
+    const shell = stripMemoryJsonShell(this.profile.memory);
+    if (!shell.stripped || shell.text === this.profile.memory) return false;
+    const before = String(this.profile.memory ?? "").length;
+    this.setProfileMemory(shell.text);
+    gameLog.warn(
+      `[画像] ${this.displayName} 的记忆是 JSON 外壳（${before} 字），` +
+        `已剥离为纯文本日志（${shell.text.length} 字）。`,
+    );
+    return true;
+  }
+
+  /**
    * 设置画像来源：ai=AI 可继续维护；manual=玩家锁定，AI 不再覆写。
    */
   setProfileSource(source: "ai" | "manual"): void {
@@ -389,8 +462,12 @@ export class Character {
    * @returns 是否实际写入。
    */
   appendAiMemoryEntries(entries: string[], fullText?: string): boolean {
+    // ① 先自愈旧存档的 JSON 外壳：不剥掉的话，下面的 splitMemoryEntries 会把整段
+    //    JSON 当成「旧条目」，每轮把它整体再追加一份（实测滚到 4922 字 / 6 份）。
+    this.healMemoryJsonShell();
+    // ② AI 也可能把单条"条目"写成 JSON 外壳（它照着提示词里的样子回传），逐条剥。
     const incoming = (entries ?? [])
-      .map((e) => String(e ?? "").replace(/\r\n?/g, "\n").trim())
+      .map((e) => stripMemoryJsonShell(String(e ?? "").replace(/\r\n?/g, "\n")).text.trim())
       .filter((e) => e.length > 0);
     const full = String(fullText ?? "").replace(/\r\n?/g, "\n").trim();
     if (!full && incoming.length === 0) return false;
@@ -433,7 +510,10 @@ export class Character {
     if (typeof patch.memory === "string" && patch.memory.trim()) {
       // 记忆是「只追加、不改旧条目」的日志：AI 每回合返回整段文本，容易顺手润色旧条目，
       // 这里按时间行逐条校验，改写过的版本会被回滚成「旧条目原样 + 新条目追加到顶部」。
-      const guarded = guardMemoryUpdate(this.profile.memory, patch.memory.trim());
+      // 进守卫前先剥掉可能的 JSON 外壳（模型照着提示词里的样子回传时会带）。
+      this.healMemoryJsonShell();
+      const incoming = stripMemoryJsonShell(patch.memory.trim()).text;
+      const guarded = guardMemoryUpdate(this.profile.memory, incoming);
       if (guarded.repaired) {
         gameLog.warn(
           `[画像] ${this.displayName} 的记忆含 ${guarded.rewritten} 条改写、${guarded.missing} 条丢失，` +
@@ -549,6 +629,7 @@ export class Character {
       gongfaSlots: this.gongfaSlots,
       inventorySlots: this.inventorySlots,
       elixirBonuses: this.elixirBonuses,
+      buffs: this.buffs.map(b => ({ ...b })),
       profile: { ...this.profile },
     };
   }

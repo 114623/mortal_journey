@@ -4,7 +4,15 @@ import { npcStore } from "../role_core/npcStore";
 import type { Npc } from "../role_core/Npc";
 import type { InventoryStackItem, TreasureItemDefinition, GongfaItemDefinition } from "../role_core/types/itemInfo";
 import type { BattleTriggerEntry } from "../ai/state_generate";
+import type { WorldTime } from "../role_core/worldTime";
+import { createBuff } from "../role_core/types/characterBuff";
 import { gameLog } from "../log/gameLog";
+
+/** 按 npcId 精确回查参战 NPC；id 未命中（旧存档战斗快照）时按 displayName 兜底。 */
+function resolveSettleNpc(sourceNpcId: string | undefined, sourceNpcName: string): Npc | undefined {
+  const byId = sourceNpcId ? npcStore.getNpcById(sourceNpcId) : undefined;
+  return byId ?? npcStore.getNpc(sourceNpcName);
+}
 
 /**
  * 从 NPC 的 equippedSlots（法宝）+ gongfaSlots（功法）中随机抽取一件作为战利品。
@@ -37,6 +45,12 @@ export interface SettleBattleOptions {
   protagonistCanDie?: boolean;
   /** 队友战败是否身亡（正常/困难=true；简单=false，队友不会死亡）。 */
   companionsCanDie?: boolean;
+  /**
+   * 当前世界时间。用于给重伤存活者挂持久 buff（需要起始时间才算得出到期日）。
+   *
+   * 省略时**不挂任何 buff**（降级为旧行为），不会用错误的起点写进存档。
+   */
+  now?: WorldTime | null;
 }
 
 /**
@@ -128,6 +142,22 @@ export function settleBattle(state: BattleState, opts?: SettleBattleOptions): Ba
             ? "[战斗结算] 切磋之战，主角落败但无性命之忧。"
             : "[战斗结算] 死斗之中主角重伤倒地，侥幸留得性命。",
         );
+        // 死斗重伤：挂「气血亏虚」。切磋点到为止，不留伤。
+        // 同时先清一遍过期 buff，避免数组里堆着早已失效的旧伤。
+        if (!isSpar && opts?.now) {
+          p.pruneBuffs(opts.now);
+          const buff = createBuff({ name: "气血亏虚", source: "战斗", now: opts.now });
+          if (buff) {
+            // 同名不可叠加：已有则只把起始时间推到现在（等于续期）。
+            const existing = p.buffs.find(b => b.name === buff.name);
+            if (existing) existing.startedAt = buff.startedAt;
+            else p.buffs.push(buff);
+            gameLog.info(`[战斗结算] 主角落下病根：${buff.name}（${buff.durationDays} 天）。`);
+            // buff 改的是血/法**上限**，必须重算派生值，否则面板与快照里的 maxHp 还是旧数，
+            // 表现为「挂了减益但血条上限没变」。
+            p.refreshDerivedStats();
+          }
+        }
       }
     } else {
       const hpPct = protagonistCombatant.stats.maxHp > 0
@@ -161,7 +191,7 @@ export function settleBattle(state: BattleState, opts?: SettleBattleOptions): Ba
   const lootRecipient = p;
   for (const enemy of state.enemies) {
     if (enemy.isDead && enemy.sourceNpcName) {
-      const npc = npcStore.getNpc(enemy.sourceNpcName);
+      const npc = resolveSettleNpc(enemy.sourceNpcId, enemy.sourceNpcName);
       if (npc) {
         // 倒地但生死未定：不标记死亡，保底 1 HP（重伤昏厥）。
         // 是否补刀由战后处置决定——玩家的处置语句写进剧情后，
@@ -190,7 +220,7 @@ export function settleBattle(state: BattleState, opts?: SettleBattleOptions): Ba
 
   for (const ally of state.allies) {
     if (ally.isProtagonist || !ally.sourceNpcName) continue;
-    const npc = npcStore.getNpc(ally.sourceNpcName);
+    const npc = resolveSettleNpc(ally.sourceNpcId, ally.sourceNpcName);
     if (!npc) continue;
 
     if (ally.isDead) {

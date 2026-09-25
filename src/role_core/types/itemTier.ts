@@ -9,13 +9,25 @@
  * 实现方式是双层闭环：
  *   ① 生成时：数值 = 基础值 × TIER_MULT[tier]（高阶层物品的初始数值本来就更高）
  *   ② 使用时：跨境界威能衰减（法宝走 {@link treasureTierFactor}、功法走
- *      {@link gongfaTierFactor} → tierFactor，同为 0.65^Δ 低阶衰减）
+ *      {@link gongfaTierFactor}）
  *
  * 丹药有独立系数（见 `elixirTierFactor`），材料待扩展。
  *
+ * 【2026-09-25 v4 变更 · 功法数值改由「层号」锚定】
+ * 核心模型：**同层同值，阶层只决定能修到第几层**。
+ * 任何功法在第 L 层的主属性加成完全相同，与它是什么阶层、谁在用都无关
+ * （见 `realmScale.gongfaLayerValue`）。于是——
+ *   - **自然淘汰**：练气功法满层 L7 = +37.5 是固定绝对值，带到筑基（基准 250）
+ *     相对缩水到 15%，带到化神约 1%，不需要任何压制系数；
+ *   - **越阶无 spike**：筑基功法 L1 = 练气功法 L1 = +18.75，高阶功法的优势纯粹是
+ *     「以后能修到更深的层」，而深度由统一经验曲线 + 境界修为预算兜住。
+ * 故 {@link gongfaTierFactor} 现在只对**凡人 tier** 生效（凡俗之物不入修行：
+ * 练气期剩 40%、筑基起归零），练气及以上一律返回 1。
+ * 法宝（{@link treasureTierFactor}）与丹药**完全不受本次变更影响**，仍是
+ * 低阶 0.65^Δ / 高阶 0.70^Δ。
+ *
  * 【2026-09-21 变更】原「境界高于功法阶层 → 该功法已不入流、修炼不再产修为」的门槛
- * 已整体移除（isGongfaObsolete / describeGongfaCultivation 一并删除）：
- * 低阶功法现在只吃跨阶压制系数（打起来吃亏），不再卡住修为增长。
+ * 已整体移除（isGongfaObsolete / describeGongfaCultivation 一并删除）。
  */
 
 /* 只取类型，不取运行时值。
@@ -75,9 +87,20 @@ export const TIER_SUPP_LOW = 0.65;
 
 /**
  * 物品阶层**高于**使用者境界时（器灵未解封），每差一个大境界保留的威能比例。
- * 比 TIER_SUPP_LOW 更狠：越级捡到重宝也应只是「埋下伏笔」，而非立刻起飞。
+ *
+ * 【2026-09-24 调整】0.35 → **0.70**（玩家指定：「让高阶神装稍强于同阶」）。
+ *
+ * 判据：TIER_MULT 相邻档比值是 1.5~2.0，而原值 0.35 远小于 1/1.625，
+ * 于是「筑基期拿到结丹神装」的实际数值只有同阶神装的 **56%**——越阶捡宝
+ * 反而变弱，与直觉严重相悖（见 `treasureTierFactor` 的推导）。
+ * 提到 0.70 后，越一阶 ≈ 同阶的 **105%~140%**，即「稍强于同阶」。
+ *
+ * ⚠️ 副作用（已知，暂未处理）：本系数对 Δ≥2 同样生效，而 TIER_MULT 的增长
+ * 快于 0.7^Δ 的衰减，导致**越阶越多反而越强**（越两阶 113%~157%、
+ * 越三阶 113%~178%、越五阶可达 202%）。若后续要堵「捡到化神神装直接毕业」，
+ * 需给 Δ≥2 单独设一条更陡的衰减，而不是继续动这个数。
  */
-export const TIER_SUPP_HIGH = 0.35;
+export const TIER_SUPP_HIGH = 0.70;
 
 /** 威能残留的下限，避免高阶差过大时变成完全无用（保留一丝叙事价值）。 */
 export const TIER_SUPP_FLOOR = 0.05;
@@ -88,13 +111,18 @@ export const TIER_SUPP_FLOOR = 0.05;
  * 普通阶层走 `TIER_SUPP_LOW ^ Δ`（练气用凡人阶 = 65%），对凡人物件太宽容了——
  * 一把铁刀练气期还能发挥三分威能，会让「换装」动机彻底消失。故凡人阶单列：
  *
- * - 使用者高 1 阶（练气）→ 仅剩 10%
+ * - 使用者高 1 阶（练气）→ 40%
  * - 使用者高 2 阶及以上（筑基 / 结丹 / 元婴 / 化神）→ **完全失效（0）**
+ *
+ * 【2026-09-23 调整】高 1 阶由 10% 上调至 **40%**（用户指定）。
+ * 原值过于严苛：主角刚引气入体时手里基本只有凡人物件，一刀砍到一成等于逼人在
+ * 最缺装备的第一境界裸奔；留四成既保住「该换了」的压力，也不至于寸步难行。
+ * 筑基起归零的规则不变——凡俗之物终究不入修行。
  *
  * 注意：这里刻意绕过 {@link TIER_SUPP_FLOOR}，否则永远归不了零。
  */
 export const MORTAL_TIER_SUPP: Readonly<Record<number, number>> = {
-  1: 0.1,
+  1: 0.4,
 };
 
 /** 凡人阶物品在「高 2 阶及以上」时彻底失效。 */
@@ -153,8 +181,11 @@ export function tierIndex(tier: string | null | undefined): number {
 /**
  * 掉落 / 生成时确定物品阶层：默认等于当前大境界。
  *
- * 保留 8% 概率越一阶（掉出比当前境界高一阶的宝物），制造惊喜与「埋伏笔」；
- * 但越阶物品会被 `tierFactor` 的器灵封印压住，不会立刻破坏平衡。
+ * 保留 8% 概率越一阶（掉出比当前境界高一阶的宝物），制造惊喜与「埋伏笔」。
+ *
+ * 注：2026-09-24 起器灵封印放宽到 0.70，越一阶的实际数值已**略高于**同阶
+ * （105%~140%），掉落惊喜感更强；代价是掉落的「伏笔」不再温和，
+ * 若要收紧请调 {@link TIER_SUPP_HIGH}，不要动这里的 8%。
  *
  * @param realmMajor 获取者当前大境界。
  */
@@ -170,8 +201,8 @@ export function rollItemTier(realmMajor: string | null | undefined): ItemTier {
  *
  * - 同阶：1（完全发挥）
  * - 物品低于使用者：0.65 ^ Δ（练气法宝被元婴修士使用 → 0.65³ ≈ 27%）
- * - 物品高于使用者：0.35 ^ Δ（器灵封印）
- * - **凡人阶物品**走 {@link mortalTierFactor}：高 1 阶仅剩 10%，高 2 阶起完全失效。
+ * - 物品高于使用者：0.70 ^ Δ（器灵封印；2026-09-24 由 0.35 上调，见 {@link TIER_SUPP_HIGH}）
+ * - **凡人阶物品**走 {@link mortalTierFactor}：高 1 阶（练气）剩 40%，高 2 阶起完全失效。
  *
  * 法宝与功法共用本曲线（法宝经 {@link treasureTierFactor}，曲线相同）。
  *
@@ -200,8 +231,9 @@ export function tierFactor(
  * 2026-09-19 复原：取消「低阶法宝不削弱」的特殊规则，曲线与 {@link tierFactor}
  * 完全一致的双向压制——
  * - 物品低于使用者：0.65 ^ Δ（练气法宝被元婴修士使用 → 0.65³ ≈ 27%）
- * - 物品高于使用者：0.35 ^ Δ（器灵封印，防越阶捡宝直接毕业）
- * - 凡人阶物品：{@link mortalTierFactor}（高 1 阶剩 10%，高 2 阶起完全失效）
+ * - 物品高于使用者：0.70 ^ Δ（器灵封印；2026-09-24 由 0.35 上调为「稍强于同阶」，
+ *   代价是 Δ≥2 也会强于同阶，详见 {@link TIER_SUPP_HIGH}）
+ * - 凡人阶物品：{@link mortalTierFactor}（练气期剩 40%，筑基起完全失效）
  */
 export function treasureTierFactor(
   itemTier: string | null | undefined,
@@ -326,51 +358,39 @@ export function describeElixirTierSuppression(
 /**
  * 功法的**层数上限**（按阶层）。
  *
- * 阶层越低的功法可修炼的层数越少——「练气功法练到头也就五层」，
- * 于是换功法的动机从「境界超过就归零」变成自然的边际收束。
+ * 【2026-09-25 v4 重排】练气 = 凡人 +4，之后**每阶层 +3**。
+ * 层数只是**深度与里程碑**——数值全部由层号决定（见 `realmScale.gongfaLayerValue`），
+ * 阶层唯一的作用是决定这功法能修到第几层。
+ *
+ * 配合全阶层统一的经验曲线（见 `gameConstants.buildGongfaMasteryThresholds`），
+ * 每个境界的修为预算对应一个自然停驻点：练气预算 6,000 → 曲线 L6 累计 2,400、
+ * L7 累计 6,400，故普通练气修士在任何功法上都停在 L6（上限 L7 的那层要突破后补）。
  *
  * 未指定阶层的功法（老存档）按 {@link DEFAULT_GONGFA_MAX_LAYER} 处理。
  */
 export const GONGFA_MAX_LAYER_BY_TIER: Readonly<Record<ItemTier, number>> = {
   凡人: 3,
-  练气: 5,
-  筑基: 6,
-  结丹: 7,
-  元婴: 8,
-  化神: 10,
+  练气: 7,
+  筑基: 10,
+  结丹: 13,
+  元婴: 16,
+  化神: 19,
 };
 
 /** 未指定阶层时的功法层数上限（= 旧版固定值，老存档兼容）。 */
 export const DEFAULT_GONGFA_MAX_LAYER = 10;
 
-/**
- * 功法**满层时的主属性加成倍率上限**（按阶层）。
- *
- * 旧版是「所有功法满层一律 10×」，导致练气功法练满也有化神级的面板贡献。
- * 现在按阶层封顶，低阶功法的属性天花板明显更低。
+/* 【2026-09-25 v4 删除】
+ * 原 `GONGFA_ATTRI_CAP_BY_TIER` / `DEFAULT_GONGFA_ATTRI_CAP` / `gongfaAttriCap`
+ * 已整体移除。它们承担的是「按阶层封顶满层倍率」（凡人 2.5× → 化神 10×）；
+ * v4 起加成由**层号**唯一决定（`realmScale.gongfaLayerValue`），阶层不再参与数值，
+ * 这套上限就没有意义了——留着只会让人误以为数值还跟阶层有关。
  */
-export const GONGFA_ATTRI_CAP_BY_TIER: Readonly<Record<ItemTier, number>> = {
-  凡人: 2.5,
-  练气: 4,
-  筑基: 5.5,
-  结丹: 7,
-  元婴: 8.5,
-  化神: 10,
-};
-
-/** 未指定阶层时的属性倍率上限（= 旧版满层值，老存档兼容）。 */
-export const DEFAULT_GONGFA_ATTRI_CAP = 10;
 
 /** 取功法的层数上限；阶层缺失或非法时回退 {@link DEFAULT_GONGFA_MAX_LAYER}。 */
 export function gongfaMaxLayer(tier: string | null | undefined): number {
   if (!tier) return DEFAULT_GONGFA_MAX_LAYER;
   return GONGFA_MAX_LAYER_BY_TIER[tier as ItemTier] ?? DEFAULT_GONGFA_MAX_LAYER;
-}
-
-/** 取功法满层时的属性倍率上限；阶层缺失或非法时回退 {@link DEFAULT_GONGFA_ATTRI_CAP}。 */
-export function gongfaAttriCap(tier: string | null | undefined): number {
-  if (!tier) return DEFAULT_GONGFA_ATTRI_CAP;
-  return GONGFA_ATTRI_CAP_BY_TIER[tier as ItemTier] ?? DEFAULT_GONGFA_ATTRI_CAP;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -415,7 +435,7 @@ export function tierLabel(tier: string | null | undefined): string {
 /**
  * 生成法宝阶层的 UI 提示文案（含跨阶压制说明）。
  *
- * 规则与 {@link treasureTierFactor} 一致：双向压制（低阶 0.65^Δ / 高阶器灵封印 /
+ * 规则与 {@link treasureTierFactor} 一致：双向压制（低阶 0.65^Δ / 高阶 0.70^Δ 器灵封印 /
  * 凡人阶专属衰减）。
  *
  * @returns 同阶时返回 `「练气阶 · 威能全开」`；否则返回压制百分比与原因。
@@ -561,13 +581,29 @@ export function ensureGongfaTierList(
   return count;
 }
 
-/** 功法的跨阶压制系数；未指定阶层时恒为 1。 */
+/**
+ * 功法的跨阶系数。
+ *
+ * 【2026-09-25 v4 语义变更】功法不再有「威力折损系数」：
+ * 数值由**层号**唯一决定（同层同值，见 `realmScale.gongfaLayerValue`），
+ * 阶层只决定能修到第几层。绝对值固定 + 境界基准上涨 = 自然淘汰，无需额外压制，
+ * 故**仅凡人 tier 保留衰减**（凡俗之物不入修行：练气期剩 40%、筑基起归零），
+ * 练气及以上一律返回 1。
+ *
+ * 高阶功法在低境界手里同样不削——它的 L1 与低阶功法的 L1 数值完全相同，
+ * 优势只是「以后能修到更深的层」，深度由统一经验曲线 + 境界修为预算兜住。
+ *
+ * @param tier 功法阶层。
+ * @param userRealmMajor 使用者当前大境界。
+ * @returns 系数；未指定阶层或非凡人 tier 时恒为 1。
+ */
 export function gongfaTierFactor(
   tier: string | null | undefined,
   userRealmMajor: string | null | undefined,
 ): number {
   const t = resolveGongfaTier(tier);
   if (!t) return 1;
+  if (t !== "凡人") return 1;
   return tierFactor(t, userRealmMajor);
 }
 

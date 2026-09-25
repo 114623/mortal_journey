@@ -18,7 +18,7 @@ import type { Npc } from "./Npc";
 import { Protagonist, protagonist } from "./Protagonist";
 import { npcStore } from "./npcStore";
 import { setWorldSettings } from "./worldSettingsStore";
-import { applyNpcGongfaMasteryByRealm } from "./realmUtils";
+import { applyNpcGongfaMasteryByRealm, getRealmPrimaryStats } from "./realmUtils";
 import { writeActiveSave } from "../save/gameSave";
 import { gameLog } from "../log/gameLog";
 
@@ -34,9 +34,14 @@ export interface ProfileDraft {
 /** 主角在待应用队列里的键（NPC 用其稳定 npcId）。 */
 export const PROTAGONIST_PENDING_KEY = "__protagonist__";
 
-/** NPC 基础信息草稿（名字 / 性别 / 年龄 / 寿元 / 境界 / 灵根 / 身份简介）。 */
-export interface NpcBasicsDraft {
-  /** 目标 NPC 的稳定 id（定位用，草稿本身不改它）。 */
+/**
+ * 角色基础信息草稿（名字 / 性别 / 年龄 / 寿元 / 境界 / 灵根 / 身份简介）。
+ *
+ * **主角与 NPC 共用**：两者的可编辑项一致，只有「身份简介」是 NPC 专属
+ * （主角没有 identity 字段，草稿里恒为空串，保存时忽略）。
+ */
+export interface CharacterBasicsDraft {
+  /** 目标角色的稳定 id（定位用，草稿本身不改它）。主角为 "protagonist"。 */
   npcId: string;
   displayName: string;
   gender: string;
@@ -46,21 +51,25 @@ export interface NpcBasicsDraft {
   realmMinor: string;
   linggen: string[];
   /**
-   * 身份称谓——角色卡与信息界面里「名字下面那行简介」的可编辑部分
-   * （显示为「身份 · 境界」）。玩家可在「角色设定」里直接改。
+   * 身份称谓（仅 NPC）——角色卡与信息界面里「名字下面那行简介」的可编辑部分
+   * （显示为「身份 · 境界」）。主角恒为空串。
    */
   identity: string;
 }
 
+/** 旧名兼容：本队列原本只有 NPC 在用，主角接入后改叫 {@link CharacterBasicsDraft}。 */
+export type NpcBasicsDraft = CharacterBasicsDraft;
+
 /** 待应用改动的存档形态（纯 JSON）。 */
 export interface PendingEditsSerial {
   profiles?: Record<string, ProfileDraft>;
-  npcBasics?: Record<string, NpcBasicsDraft>;
+  npcBasics?: Record<string, CharacterBasicsDraft>;
   worldSettings?: WorldSettingsText;
 }
 
 const pendingProfiles = ref<Record<string, ProfileDraft>>({});
-const pendingNpcBasics = ref<Record<string, NpcBasicsDraft>>({});
+/** 基础信息队列（NPC 用 npcId 作键，主角用 {@link PROTAGONIST_PENDING_KEY}）。 */
+const pendingNpcBasics = ref<Record<string, CharacterBasicsDraft>>({});
 const pendingWorldSettings = ref<WorldSettingsText | null>(null);
 
 /** 待应用改动总数（画像条数 + NPC 基础信息条数 + 世界设定 0/1）。 */
@@ -133,20 +142,22 @@ export function readProfileDraft(character: Character): ProfileDraft {
 }
 
 // ---------------------------------------------------------------------------
-// NPC 基础信息（名字 / 性别 / 年龄 / 寿元 / 境界 / 灵根）
+// 角色基础信息（名字 / 性别 / 年龄 / 寿元 / 境界 / 灵根 / 身份简介）
+//
+// 主角与 NPC 共用同一条队列与同一份草稿结构，见 {@link CharacterBasicsDraft}。
 // ---------------------------------------------------------------------------
 
-/** 取某个 NPC 的待应用基础信息草稿；没有则 null。 */
-export function getPendingNpcBasics(key: string): NpcBasicsDraft | null {
+/** 取某个角色的待应用基础信息草稿；没有则 null。 */
+export function getPendingNpcBasics(key: string): CharacterBasicsDraft | null {
   return pendingNpcBasics.value[key] ?? null;
 }
 
-/** 写入/覆盖某个 NPC 的待应用基础信息草稿。 */
-export function setPendingNpcBasics(key: string, draft: NpcBasicsDraft): void {
+/** 写入/覆盖某个角色的待应用基础信息草稿。 */
+export function setPendingNpcBasics(key: string, draft: CharacterBasicsDraft): void {
   pendingNpcBasics.value = { ...pendingNpcBasics.value, [key]: { ...draft, linggen: [...draft.linggen] } };
 }
 
-/** 丢弃某个 NPC 的待应用基础信息草稿。 */
+/** 丢弃某个角色的待应用基础信息草稿。 */
 export function clearPendingNpcBasics(key: string): void {
   if (!(key in pendingNpcBasics.value)) return;
   const next = { ...pendingNpcBasics.value };
@@ -154,54 +165,88 @@ export function clearPendingNpcBasics(key: string): void {
   pendingNpcBasics.value = next;
 }
 
-/** 从 NPC 实例读出一份基础信息草稿。 */
-export function readNpcBasicsDraft(npc: Npc): NpcBasicsDraft {
+/** 从角色实例（主角或 NPC）读出一份基础信息草稿。 */
+export function readCharacterBasicsDraft(c: Character): CharacterBasicsDraft {
   return {
-    npcId: npc.id,
-    displayName: npc.displayName,
-    gender: npc.gender || "男",
-    age: npc.age ?? 0,
-    shouyuan: npc.shouyuan ?? 0,
-    realmMajor: npc.realm?.major ?? "练气",
-    realmMinor: npc.realm?.minor ?? "初期",
-    linggen: [...(npc.linggen ?? [])],
-    identity: npc.identity ?? "",
+    npcId: c.id,
+    displayName: c.displayName,
+    gender: c.gender || "男",
+    age: c.age ?? 0,
+    shouyuan: c.shouyuan ?? 0,
+    realmMajor: c.realm?.major ?? "练气",
+    realmMinor: c.realm?.minor ?? "初期",
+    linggen: [...(c.linggen ?? [])],
+    identity: (c as Npc).identity ?? "",
   };
 }
 
+/** 旧名兼容，见 {@link readCharacterBasicsDraft}。 */
+export const readNpcBasicsDraft = readCharacterBasicsDraft;
+
+/** 是否为主角（基础信息里只有主角需要额外处理修为与满血）。 */
+function isProtagonistCharacter(c: Character): boolean {
+  return (c as unknown as { role?: string }).role === "protagonist";
+}
+
 /**
- * 把基础信息草稿写进 NPC 实例（不落盘、不碰队列）。
+ * 把基础信息草稿写进角色实例（主角或 NPC，不落盘、不碰队列）。
  *
- * 改名时同步维护 store 的 key（store 以 displayName 为键，旧键必须删掉，
- * 否则同一个 NPC 会在 Map 里留下两条指向同一对象的记录）。
+ * 两条分支的差异只在境界变动时：
+ * - NPC：功法层数按新境界重算（NPC 的层数是「按境界修为总量反推」的快照）；
+ * - 主角：主属性重设为境界表基准、修为归零并清掉圆满状态（修为阈值随境界变，
+ *   留着旧值会出现「刚升境界就已圆满」这类错乱），气血回满。
+ *
+ * 改名只改 displayName，不动 store 的键（store 主键是 npcId，改名不影响索引）。
+ * 主角不在 store 里，跳过。
  */
-export function applyNpcBasicsDraft(npc: Npc, draft: NpcBasicsDraft): void {
-  const oldName = npc.displayName;
+export function applyCharacterBasicsDraft(c: Character, draft: CharacterBasicsDraft): void {
+  const isProto = isProtagonistCharacter(c);
   const realmChanged =
-    npc.realm?.major !== draft.realmMajor || npc.realm?.minor !== draft.realmMinor;
-  npc.setDisplayName(draft.displayName);
-  npc.gender = draft.gender || "男";
-  npc.setAge(draft.age);
-  npc.setShouyuan(draft.shouyuan);
-  npc.setRealm(draft.realmMajor, draft.realmMinor);
-  npc.linggen = [...draft.linggen];
-  npc.identity = (draft.identity ?? "").trim();
+    c.realm?.major !== draft.realmMajor || c.realm?.minor !== draft.realmMinor;
+
+  c.setDisplayName(draft.displayName);
+  c.gender = draft.gender || "男";
+  c.setAge(draft.age);
+  c.setShouyuan(draft.shouyuan);
+  c.setRealm(draft.realmMajor, draft.realmMinor);
+  c.linggen = [...draft.linggen];
+  if (!isProto) (c as Npc).identity = (draft.identity ?? "").trim();
 
   if (realmChanged) {
-    // 主属性是从境界表实时派生的（realmTableBaseOrStored），改境界即自动生效；
-    // 但功法层数是「按境界修为总量反推」的快照，必须显式重算，否则会停在旧境界。
-    applyNpcGongfaMasteryByRealm(npc.gongfaSlots, draft.realmMajor, draft.realmMinor);
-    gameLog.info(
-      `[PendingEdits] ${npc.displayName} 境界改为 ${draft.realmMajor}${draft.realmMinor}，功法层数已按新境界重算。`,
-    );
+    if (isProto) {
+      const p = c as Protagonist;
+      const base = getRealmPrimaryStats(draft.realmMajor, draft.realmMinor);
+      if (base) p.patchPrimaryStats(base);
+      p.setXiuwei(0);
+      p.realmComplete = false;
+      p.breakthroughStatus = "idle";
+      gameLog.info(
+        `[PendingEdits] 主角境界改为 ${draft.realmMajor}${draft.realmMinor}，修为已归零、主属性按新境界重算。`,
+      );
+    } else {
+      // 主属性是从境界表实时派生的（realmTableBaseOrStored），改境界即自动生效；
+      // 但功法层数是「按境界修为总量反推」的快照，必须显式重算，否则会停在旧境界。
+      applyNpcGongfaMasteryByRealm(c.gongfaSlots, draft.realmMajor, draft.realmMinor);
+      gameLog.info(
+        `[PendingEdits] ${c.displayName} 境界改为 ${draft.realmMajor}${draft.realmMinor}，功法层数已按新境界重算。`,
+      );
+    }
   }
 
   // 境界变动会改变境界属性表与 HP/MP 上限，必须重算。
-  const { maxHp, maxMp } = npc.computeMaxHpMp();
-  npc.setMaxHpMp(maxHp, maxMp);
-  if (oldName !== npc.displayName) npcStore.removeNpc(oldName);
-  npcStore.setNpc(npc);
+  const { maxHp, maxMp } = c.computeMaxHpMp();
+  c.setMaxHpMp(maxHp, maxMp);
+  if (isProto) {
+    // 主角改境界视同一次改命：气血法力回满，避免旧血量被新上限截断成残血。
+    if (realmChanged) c.setCurrentHpMp(maxHp, maxMp);
+    Protagonist.notifyChanged();
+  } else {
+    npcStore.setNpc(c as Npc);
+  }
 }
+
+/** 旧名兼容，见 {@link applyCharacterBasicsDraft}。 */
+export const applyNpcBasicsDraft = applyCharacterBasicsDraft;
 
 // ---------------------------------------------------------------------------
 // 世界设定
@@ -243,14 +288,14 @@ function resolveCharacter(key: string): Character | null {
 export function flushPendingEdits(): number {
   let applied = 0;
 
-  // 先应用基础信息：改名会重建 store 的键，之后再写画像才不会落到旧键上。
+  // 先应用基础信息（改名不改键），之后再写画像，写入目标始终是同一个 id 键。
   for (const [key, draft] of Object.entries(pendingNpcBasics.value)) {
     const c = resolveCharacter(key);
     if (!c) {
-      gameLog.warn(`[PendingEdits] 找不到 NPC ${key}，丢弃其待应用基础信息。`);
+      gameLog.warn(`[PendingEdits] 找不到角色 ${key}，丢弃其待应用基础信息。`);
       continue;
     }
-    applyNpcBasicsDraft(c as Npc, draft);
+    applyCharacterBasicsDraft(c, draft);
     applied++;
   }
 
@@ -321,12 +366,12 @@ export function restorePendingEdits(raw: unknown): void {
   }
   pendingProfiles.value = profiles;
 
-  const basics: Record<string, NpcBasicsDraft> = {};
+  const basics: Record<string, CharacterBasicsDraft> = {};
   const bsrc = o.npcBasics;
   if (bsrc && typeof bsrc === "object") {
     for (const [k, v] of Object.entries(bsrc)) {
       if (!v || typeof v !== "object") continue;
-      const d = v as Partial<NpcBasicsDraft>;
+      const d = v as Partial<CharacterBasicsDraft>;
       if (typeof d.displayName !== "string") continue;
       basics[k] = {
         npcId: typeof d.npcId === "string" ? d.npcId : k,

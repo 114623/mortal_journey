@@ -265,17 +265,31 @@ export function noteBattleInScene(locationKey = ""): void {
  * - 已到最后一层且写满 → 进入收束锁；
  * - 战斗次数到上限 → 同样进入收束锁；
  * - 收束锁持续超过 {@link SCENE_CLOSING_GRACE_TURNS} 回合仍没收掉 → 强制清零防死锁。
+ *
+ * 【回合权重】配额要防的是「无限刷**非战斗**回合赖在秘境里」——
+ * 战斗回合自带战损与消耗，本来就有成本，不该同价。所以调用方按
+ * 战斗回合传 1、非战斗回合传 0.5（见 {@link noteSceneTurn} 的 weight 参数）。
+ *
+ * @param weight 本回合的权重（战斗回合 1，非战斗回合 0.5）。
+ * @return `forceCleared` 为真表示本次触发了强制清零，**调用方应补一段转场**——
+ *         否则玩家视角是「场景限制突然消失」，没有任何交代。
+ *         `sceneName` / `locationName` 是清零前的快照，供转场文案使用。
  */
-export function noteSceneTurn(): void {
+export function noteSceneTurn(weight: number = 1): {
+  forceCleared: boolean;
+  sceneName: string;
+  locationName: string;
+} {
   const cur = sceneProgress.value;
-  if (!cur) return;
+  if (!cur) return { forceCleared: false, sceneName: "", locationName: "" };
   const per = sceneBudget.value.turnsPerStage;
   const waves = sceneBudget.value.battleWavesPerScene;
+  const w = Number.isFinite(weight) && weight > 0 ? weight : 1;
 
   const next: SceneProgress = {
     ...cur,
-    turns: cur.turns + 1,
-    turnsInStage: cur.turnsInStage + 1,
+    turns: cur.turns + w,
+    turnsInStage: cur.turnsInStage + w,
   };
 
   if (cur.kind === "无") {
@@ -302,10 +316,17 @@ export function noteSceneTurn(): void {
 
   if (next.closingTurns > SCENE_CLOSING_GRACE_TURNS) {
     // 给了足够回合仍没收束 —— 判定场景已事实上结束，清零避免永久卡住。
+    // 清零前先把名字快照出来返回给调用方：它要据此给玩家补一句转场，
+    // 不然「场景限制突然消失」这件事在玩家侧毫无交代。
     sceneProgress.value = null;
-    return;
+    return {
+      forceCleared: true,
+      sceneName: cur.name || "",
+      locationName: cur.locationKey || "",
+    };
   }
   sceneProgress.value = next;
+  return { forceCleared: false, sceneName: "", locationName: "" };
 }
 
 /** 场景是否触顶（层/轮用尽、战斗用尽，或已在收束锁中）。 */
@@ -425,8 +446,10 @@ export function formatSceneProgress(): string {
   if (cur.kind === "无") return `当前地点 战斗 ${cur.battles}/${waves}${tail}`;
   const unit = cur.kind === "秘境" ? "层" : "轮";
   const name = cur.name ? `·${cur.name}` : "";
+  // turnsInStage 可能是 0.5 的奇数倍（非战斗回合按半回合计），展示一律向上取整，
+  // 免得 UI 上冒出「本层 2.5/3 回合」这种看着像 bug 的数字。
   return `${cur.kind}${name} ${cur.stage}/${cur.total} ${unit}` +
-    `（本${unit} ${cur.turnsInStage}/${sceneBudget.value.turnsPerStage} 回合，战斗 ${cur.battles}/${waves}）${tail}`;
+    `（本${unit} ${Math.ceil(cur.turnsInStage)}/${sceneBudget.value.turnsPerStage} 回合，战斗 ${cur.battles}/${waves}）${tail}`;
 }
 
 export const sceneBudgetStore = {

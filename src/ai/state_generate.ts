@@ -21,7 +21,7 @@ import {
   type NpcRace,
 } from "../role_core/types/playInfo";
 import { type WorldTime, type TimeDelta, formatWorldTimeZhPrecise } from "../role_core/worldTime";
-import { describeNextBreakthrough, gongfaMaxLayerOf } from "../role_core/realmUtils";
+import { describeNextBreakthrough, gongfaMaxLayerOf, isMortalPeakLocked } from "../role_core/realmUtils";
 import { formatWorldLocationDash, parseWorldLocationFromDash } from "../role_core/types/worldLocation";
 import type { SceneReport } from "../role_core/sceneBudgetStore";
 import type { FactionChange } from "../role_core/factionStore";
@@ -34,6 +34,9 @@ import {
 } from "./npcConsistency";
 import { resolveGongfaTier } from "../role_core/types/itemTier";
 import { genderLine, genderRule } from "./genderGuard";
+import { formatBuffForDisplay, isBuffExpired } from "../role_core/types/characterBuff";
+import { stripMemoryJsonShell, splitMemoryEntries } from "../role_core/memoryLog";
+import { gameLog } from "../log/gameLog";
 
 export interface StateGenerateInput {
   apiUrl: string;
@@ -139,6 +142,8 @@ export interface NpcNearbyEntry {
 }
 
 export interface BattleCombatant {
+  /** 稳定 npcId（与 NPC_NEARBY 输出的 id 一致）。程序优先按 id 回查 npcStore，displayName 兜底。 */
+  npcId?: string;
   displayName: string;
   roleHint: string;
 }
@@ -212,10 +217,71 @@ export interface StateParsed {
   protagonistMemory: { entries: string[]; full: string } | null;
   /** NPC 与剧情正文的一致性校验结果（未传 storyBody 时为 null）。 */
   npcConsistency: NpcConsistencyResult | null;
+  /**
+   * 本回合的主线进度回报（`MJ_MAINLINE_TAG`）。null = AI 没输出该标签（老模型/被截断）。
+   * 这是"主线进度反馈闭环"的唯一数据源（见 robustness-spec §G）。
+   */
+  mainlineReport: MainlineReport | null;
+}
+
+/** 主线进度回报：`advanced` 为真表示本回合与主线有关，`note` 是一句话说明。 */
+export interface MainlineReport {
+  advanced: boolean;
+  note: string;
+}
+
+/**
+ * 找出本回合**缺了哪些关键标签**。
+ *
+ * 【2026-09-25】状态 AI 的输出被截断时，末尾标签会整段消失，而解析端一律按
+ * "没写就是没变化"处理——于是玩家侧看到的是静默的状态丢失。这里把缺失挑出来，
+ * 让上层能：① 写 gameLog 供排查；② 给玩家一条灰色提示，至少知道"这回合没记全"。
+ *
+ * 只查**每回合都该有**的段（`timeAdvance` 例外，见下）。条件输出的段
+ * （战斗触发、突破、物品增删…）本就可能合法为空，不在此列。
+ *
+ * @param parsed 解析结果。
+ * @return 缺失项的人话名列表；全部齐备时为空数组。
+ */
+export function findMissingCriticalTags(parsed: StateParsed): string[] {
+  const missing: string[] = [];
+  if (!parsed.storySnapshot.trim()) missing.push("剧情快照");
+  if (!parsed.timeAdvance) missing.push("时间推进");
+  if (!parsed.mainlineReport) missing.push("主线进度");
+  return missing;
+}
+
+/**
+ * 解析主线进度回报。
+ *
+ * 容错优先：标签缺失 / JSON 坏掉 / advanced 不是布尔，一律当"没报"（null），
+ * 由上层决定要不要提示。**绝不**把解析失败当成"本回合未推进主线"——
+ * 那会让剧情 AI 误判主线停滞，反过来把线索硬塞给玩家。
+ */
+export function parseMainlineReport(raw: string): MainlineReport | null {
+  const text = extractTagContent(raw, TAG_MAINLINE_OPEN, TAG_MAINLINE_CLOSE);
+  if (!text.trim()) return null;
+  const obj = safeJsonParse(text);
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+  const o = obj as Record<string, unknown>;
+  const advanced = o.advanced === true;
+  const note = typeof o.note === "string" ? o.note.trim().slice(0, 60) : "";
+  return { advanced, note };
 }
 
 const DEFAULT_TEMPERATURE = 0.55;
-const DEFAULT_MAX_TOKENS = 16384;
+/**
+ * 状态 AI 的输出预算。
+ *
+ * 【2026-09-25】16384 → 65535（与剧情链路对齐）。状态 AI 要一次吐**十五段标签**
+ * （含 4 条各 2~4 句的推进选项、NPC 更新、记忆、剧情快照），输出量远大于只要一段正文的
+ * 剧情 AI，却只给了后者 1/4 的预算。实测这是「有时候更新状态失败」的主因之一：
+ * 预算耗尽 → 上游返回 `finish_reason:"length"` → 末尾的「推进选项 / 快照」被砍掉。
+ *
+ * 注意：带 thinking / reasoning 的渠道会把思考过程也计入 completion_tokens，
+ * 这类渠道的实际可用预算还要再打个折——所以宁可给足。
+ */
+const DEFAULT_MAX_TOKENS = 65535;
 
 const MJ_WORLD_BODY_OPEN = "<mj_world_body>";
 const MJ_WORLD_BODY_CLOSE = "</mj_world_body>";
@@ -249,6 +315,8 @@ const TAG_BREAKTHROUGH_OPEN = "<MJ_BREAKTHROUGH_TAG>";
 const TAG_BREAKTHROUGH_CLOSE = "</MJ_BREAKTHROUGH_TAG>";
 const TAG_PROTAGONIST_MEMORY_OPEN = "<MJ_PROTAGONIST_MEMORY_TAG>";
 const TAG_PROTAGONIST_MEMORY_CLOSE = "</MJ_PROTAGONIST_MEMORY_TAG>";
+const TAG_MAINLINE_OPEN = "<MJ_MAINLINE_TAG>";
+const TAG_MAINLINE_CLOSE = "</MJ_MAINLINE_TAG>";
 
 function extractWorldBody(raw: string): WorldLocation | null {
   const s = raw == null ? "" : String(raw);
@@ -491,7 +559,8 @@ function parseCombatantList(arr: unknown[]): BattleCombatant[] {
       const o = e as Record<string, unknown>;
       const displayName = String(o.displayName || "").trim();
       if (!displayName) return null;
-      return { displayName, roleHint: String(o.roleHint || "") };
+      const npcIdRaw = typeof o.npcId === "string" ? o.npcId.trim() : "";
+      return { npcId: npcIdRaw || undefined, displayName, roleHint: String(o.roleHint || "") };
     })
     .filter((e): e is BattleCombatant => e !== null);
 }
@@ -856,6 +925,7 @@ export function parseStateAiResponse(
   const sceneReport = parseSceneReport(raw);
   const factionChanges = parseFactionChanges(raw);
   const protagonistMemory = parseProtagonistMemory(raw);
+  const mainlineReport = parseMainlineReport(raw);
 
   return {
     worldLocation,
@@ -875,6 +945,7 @@ export function parseStateAiResponse(
     sceneReport,
     protagonistMemory,
     npcConsistency,
+    mainlineReport,
   };
 }
 
@@ -904,7 +975,23 @@ function parseProtagonistMemory(raw: string): { entries: string[]; full: string 
     if (entries.length === 0 && !full) return null;
     return { entries, full };
   }
-  // 裸文本兜底：按空行切成条目。
+  // 走到这里说明 `JSON.parse` 失败——**最常见的正是模型吐了未经转义换行的 JSON**
+  // （`{"full":"0004年…\n洛临…"}` 里换行是裸的，不是 `\n` 两个字符）。
+  // 此时绝不能按空行切条目：整段 JSON 会被当成一条"记忆条目"追加进旧记忆，
+  // 旧 JSON 因此每轮整体再复制一份。先试着把手写 JSON 抠出字段。
+  const shell = stripMemoryJsonShell(text);
+  if (shell.stripped) {
+    // 抠出来的是**整段记忆**（full），只能当 full 用——
+    // 放进 entries 会被「只追加」守卫判成"改写全部旧条目"，反而把旧条目复制一遍。
+    // full 只在压缩轮生效；非压缩轮 appendAiMemoryEntries 会丢弃整段、只留 entries，
+    // 所以这里把 full 的首条（最新那条）也一并给 entries，保证常规轮也能记下新事。
+    const firstEntry = splitMemoryEntries(shell.text)[0] ?? "";
+    return {
+      entries: firstEntry ? [firstEntry] : [],
+      full: shell.text,
+    };
+  }
+  // 确实是裸文本：按空行切成条目。
   const entries = clean(text.split(/\n\s*\n/));
   return entries.length > 0 ? { entries, full: "" } : null;
 }
@@ -961,7 +1048,19 @@ function formatInventorySlots(slots: Array<InventoryStackItem | null>): string {
  * 主角没有内容时给一行占位，避免 AI 以为没有这个机制。
  */
 function protagonistMemoryHint(p: { profile?: { memory?: string } }): string {
-  const mem = (p?.profile?.memory ?? "").trim();
+  const raw = (p?.profile?.memory ?? "").trim();
+  if (!raw) return "\n【主角记忆】暂无（本回合若有值得记的事，在 <MJ_PROTAGONIST_MEMORY_TAG> 里开条）";
+  // 【关键】注入前必须剥掉 JSON 外壳：这段是**原样贴给模型**的，
+  // 一旦把 `{"full":…,"entries":[…]}` 喂进去，模型就会照着这个样子回传，
+  // 回传的又落回同一个字段 → 每轮整份复制一遍，自我强化、无限膨胀。
+  // 剥壳后模型看到的是纯三行日志，输出格式自然就正了。
+  const shell = stripMemoryJsonShell(raw);
+  if (shell.stripped) {
+    gameLog.warn(
+      `[状态AI] 主角记忆含 JSON 外壳（${raw.length} 字），注入前已剥离为纯文本（${shell.text.length} 字）。`,
+    );
+  }
+  const mem = shell.text.trim();
   if (!mem) return "\n【主角记忆】暂无（本回合若有值得记的事，在 <MJ_PROTAGONIST_MEMORY_TAG> 里开条）";
   const needCompress = mem.length > MEMORY_COMPRESS_THRESHOLD;
   return (
@@ -972,6 +1071,8 @@ function protagonistMemoryHint(p: { profile?: { memory?: string } }): string {
 
 function buildStateUserContent(input: StateGenerateInput): string {
   const p = input.protagonist;
+  const pLinggen = (p as { linggen?: string[] }).linggen ?? [];
+  const mortalLocked = isMortalPeakLocked(p.realm.major, p.realm.minor, pLinggen);
 
   const npcSection = input.npcSnapshot?.trim()
     ? `\n【当前场景NPC】\n${input.npcSnapshot.trim()}\n`
@@ -979,6 +1080,16 @@ function buildStateUserContent(input: StateGenerateInput): string {
 
   const locationHint = input.currentWorldLocation
     ? `\n主角当前所在地点（本轮剧情发生前·出发点）：${formatWorldLocationDash(input.currentWorldLocation)}`
+    : "";
+
+  // 持久状态（重伤后的「气血亏虚」等）：血/法上限的增减就写在上面两条里，
+  // 但**为什么低**必须明说，否则 AI 会把它当成「本来就这么弱」，
+  // 进而给出与伤势不符的体力描写（刚被打残就去长途跋涉）。
+  const buffLines = (p.buffs ?? [])
+    .filter(b => !input.currentWorldTime || !isBuffExpired(b, input.currentWorldTime))
+    .map(b => formatBuffForDisplay(b, input.currentWorldTime ?? null));
+  const buffHint = buffLines.length
+    ? `\n当前状态（持久）：${buffLines.join("；")}。写剧情与血量百分比时必须顾及，恢复需疗伤/静养并等待天数，不会凭空消失。`
     : "";
 
   // 带「时」的精确时间：NPC 记忆日志的时间行要用到（写「某日」或凭空编分钟都会与游戏时间对不上）。
@@ -1020,13 +1131,14 @@ function buildStateUserContent(input: StateGenerateInput): string {
     `姓名：${p.displayName}`,
     genderLine(p.gender),
     `境界：${p.realm.major}${p.realm.minor}${p.realmComplete ? "·圆满" : ""}`,
-    `修为状态：${p.realmComplete ? "修为已圆满" : "修为未圆满"}`,
-    `突破状态：${p.realmComplete ? (p.breakthroughStatus === "in_quest" ? "突破任务进行中" : describeNextBreakthrough(p.realm.major, p.realm.minor)) : "修为未圆满"}`,
+    `修为状态：${p.realmComplete ? "修为已圆满" : (mortalLocked ? "修为已积满，但无灵根、无法引气入体，境界锁死在凡人后期" : "修为未圆满")}`,
+    `突破状态：${p.realmComplete ? (p.breakthroughStatus === "in_quest" ? "突破任务进行中" : describeNextBreakthrough(p.realm.major, p.realm.minor, pLinggen)) : (mortalLocked ? "不可突破（无灵根，凡人后期即终点，禁止输出 realmBreakthrough / breakthroughQuestStart）" : "修为未圆满")}`,
     `当前血量：${p.currentHp}/${p.maxHp}`,
     `当前法力：${p.currentMp}/${p.maxMp}`,
-    `灵根：${(p as { linggen?: string[] }).linggen?.join("") || "无"}`,
+    `灵根：${pLinggen.join("") || "无"}${mortalLocked ? "（无灵根者无法引气入体，终其一生止步凡人后期）" : ""}`,
     locationHint,
     timeHint,
+    buffHint,
     protagonistMemoryHint(p),
     "",
     "【装备】",

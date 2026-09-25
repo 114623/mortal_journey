@@ -53,6 +53,7 @@ import {
 } from "./types/spiritStone";
 import type { ElixirItemDefinition } from "./types/elixir";
 import { elixirEffectToStatKey, applyLinggenElixirBoost } from "./types/elixir";
+import { elixirRealmScale } from "./realmScale";
 import { craftElixirDef, checkAlchemyTier } from "./alchemy";
 import type { MaterialItemDefinition } from "./types/itemInfo";
 import type { InitStateParsed } from "../ai/init_state_generate";
@@ -80,7 +81,7 @@ import {
   formatWorldLocationDash,
   isEmptyWorldLocation,
 } from "./types/playInfo";
-import { getCultivationRequired, addGongfaMasteryExp } from "./realmUtils";
+import { getCultivationRequired, addGongfaMasteryExp, hasLinggen, isMortalToQiRefiningStep } from "./realmUtils";
 import { gameLog } from "../log/gameLog";
 
 const VALID_ITEM_TYPES: ReadonlySet<string> = new Set([
@@ -166,6 +167,11 @@ export class Protagonist extends Character {
     if (this.avatarUrl && this.avatarCandidates.length === 0) {
       this.avatarCandidates = [this.avatarUrl];
     }
+    // 老存档可能带着"无灵根却已圆满"的状态：加载时就把它清掉，免得 AI 反复尝试突破。
+    if (this.isLockedAtMortalPeak()) {
+      this.realmComplete = false;
+      this.breakthroughStatus = "idle";
+    }
   }
 
   // ── 立绘候选池管理 ─────────────────────────────────────────────────────
@@ -223,14 +229,31 @@ export class Protagonist extends Character {
     this.xiuwei = Math.min(this.xiuwei + amount, cap);
     if (this.xiuwei >= cap) {
       this.xiuwei = cap;
+      // 无灵根者感应不到天地灵气，无法引气入体：凡人后期修为可满，但永远不进入"圆满待突破"状态。
+      if (this.isLockedAtMortalPeak()) {
+        Protagonist.notifyChanged();
+        return;
+      }
       this.realmComplete = true;
       this.breakthroughStatus = "ready";
     }
     Protagonist.notifyChanged();
   }
 
+  /**
+   * 是否被无灵根硬锁在凡人后期。
+   *
+   * 规则：无灵根 = 无法引气入体 = 一辈子止步凡人后期。修为可以攒满，境界不许动。
+   * 凡人初期→中期→后期属于凡人内部的小境界推进，不受此限。
+   */
+  isLockedAtMortalPeak(): boolean {
+    return isMortalToQiRefiningStep(this.realm.major, this.realm.minor) && !hasLinggen(this.linggen);
+  }
+
   breakthrough(): boolean {
     if (!this.realmComplete) return false;
+    // 硬锁兜底：老存档可能带着"无灵根却已圆满"的状态，此处一律拒绝放行。
+    if (this.isLockedAtMortalPeak()) return false;
     const majorIdx = REALM_ORDER.indexOf(this.realm.major as typeof REALM_ORDER[number]);
     if (majorIdx < 0) return false;
     const minorIdx = SUB_STAGES.indexOf(this.realm.minor as typeof SUB_STAGES[number]);
@@ -438,8 +461,13 @@ export class Protagonist extends Character {
     // 跨阶药效衰减：低阶丹药对高阶修士药力寡淡（每差一阶 ×0.2），
     // 高阶丹药对低阶修士虚不受补（每差一阶 ×0.35）。
     const tier = resolveItemTier(pill.tier, pill.grade);
-    const value = applyElixirTierSuppression(effects.value, tier, this.realm.major);
+    const suppressed = applyElixirTierSuppression(effects.value, tier, this.realm.major);
     const { isPercent } = effects;
+    // 定值型效果还要按境界缩放：表里的「提升劲力 +30」对化神后期 3950 的基准
+    // 只占 0.8%，不缩放等于废丹。百分比型跳过——它本身就是比例，天然水涨船高。
+    const value = isPercent
+      ? suppressed
+      : Math.max(1, Math.round(suppressed * elixirRealmScale(effectType, this.realm.major, this.realm.minor)));
 
     const statKey = elixirEffectToStatKey(effectType);
     if (statKey) {

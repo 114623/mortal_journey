@@ -34,6 +34,8 @@ import {
   isItemTier,
   describeTierSuppression,
   tierIndex,
+  gongfaMaxLayer,
+  gongfaTierFactor,
 } from "../role_core/types/itemTier";
 import type { ItemTier } from "../role_core/types/itemTier";
 import type {
@@ -665,7 +667,7 @@ function onSave(): void {
     rec.bonus = { [d.bonusStat]: Math.max(0, Math.round(d.bonusValue)) };
     rec.system = d.system;
     rec.role = d.role;
-    // 承继：续篇沿用原功法的修炼进度（按进度比例映射，因两者层数上限不同）。
+    // 承继：续篇沿用原功法的修炼进度（复制 + 夹取，统一曲线下同层同价可 1:1 搬）。
     const wantInherit = d.inheritFrom.trim();
     if (wantInherit !== String(rec.inheritFrom ?? "")) {
       const src = findGongfaByName(wantInherit);
@@ -751,7 +753,14 @@ function findGongfaByName(name: string): GongfaItemDefinition | null {
 const tierHint = computed(() => {
   const d = draft.value;
   if (!d) return "";
-  // 功法与法宝一视同仁：阶层只影响跨阶压制系数（2026-09-21 起不再卡修为）。
+  // 【2026-09-25 v4】功法与法宝**已不是一回事**：
+  // 功法的阶层只决定能修到第几层（不存在威力折损系数），法宝仍走跨阶压制。
+  if (selectedType.value === "功法") {
+    const maxL = gongfaMaxLayer(d.tier);
+    const f = gongfaTierFactor(d.tier, realmMajor.value);
+    const base = isItemTier(d.tier) ? `${tierLabel(d.tier)} · 至多${maxL}层` : "";
+    return f > 0 && f < 1 ? `${base}（凡俗之物·威能 ${Math.round(f * 100)}%）` : base;
+  }
   return describeTierSuppression(d.tier, realmMajor.value);
 });
 

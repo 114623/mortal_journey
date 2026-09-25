@@ -32,9 +32,22 @@
 
 import { MEMORY_COMPRESS_THRESHOLD } from "./types/playInfo";
 
-/** 时间行的识别正则：`0005年12月20日 17:00` / `0001年05月17日-0001年05月18日`。 */
+/**
+ * 时间行的识别正则。覆盖 AI 实际会写的几种形态：
+ *   `0005年12月20日 17:00`
+ *   `0005年12月20日`（只有日期）
+ *   `0004年06月22日 01:00-06:00`（同日时段）
+ *   `0004年04月21日 10:00-18:00`
+ *   `0004年04月20日-21日`（同月跨日）
+ *   `0002年02月-0003年06月`（跨年月）
+ *   `0003年06月`（只有年月）
+ *
+ * 【2026-09-24】补上"同日时段"与"跨月/跨日区间"：旧正则只认「整日 ± 跨日全称」，
+ * 于是上面后四种一律拿不到时间键，守卫无法用时间锚定它们，只能靠正文相似度认亲，
+ * 保护力度明显变弱——实测一份存档里 14 条日志只有 9 条有键，缺的正是这几种。
+ */
 const TIME_LINE =
-  /^\d{4}年\d{1,2}月\d{1,2}日(?:\s+\d{1,2}:\d{2})?(?:-\d{4}年\d{1,2}月\d{1,2}日(?:\s+\d{1,2}:\d{2})?)?$/;
+  /^\d{4}年(?:\d{1,2}月)?(?:\d{1,2}日)?(?:\s+\d{1,2}:\d{2})?(?:-(?:\d{4}年(?:\d{1,2}月)?(?:\d{1,2}日)?|\d{1,2}日)?(?:\s*\d{1,2}:\d{2})?)?$/;
 
 /**
  * 把记忆文本切成条目（空行分隔）。
@@ -136,6 +149,109 @@ function diceSimilarity(a: string, b: string): number {
 
 /** 判定「同一条旧内容的改写版」的相似度门槛。 */
 const REWRITE_SIMILARITY = 0.5;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// JSON 外壳剥离
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * 记忆文本出现过 `{"full":…,"entries":[…]}` 这类 **JSON 外壳**时的自愈。
+ *
+ * ## 为什么会有这种形态
+ *
+ * 主角记忆的提示词段落（见 `state_generate.protagonistMemoryHint`）是把
+ * `profile.memory` **原样**贴给模型的。一旦这个字段里出现了 JSON，
+ * 模型就会照着 JSON 的样子回传，于是：
+ *
+ *   1. `parseProtagonistMemory` 的 `JSON.parse` 解析失败（模型吐的 JSON 里
+ *      换行是**裸的**，没转义，不是合法 JSON）→ 落到「裸文本兜底」分支，
+ *      整段 JSON 被当成一条"记忆条目"；
+ *   2. `appendAiMemoryEntries` 把这条"条目"追加到旧记忆上 → 旧 JSON **整份再复制一遍**；
+ *   3. 字段越滚越大（实测一份存档滚到 4922 字 / 6 份 JSON，而真实内容只有约 800 字），
+ *      又原样喂回模型 → 模型继续吐 JSON。**自我强化，每轮必涨。**
+ *
+ * 附带后果：长度恒超 `MEMORY_COMPRESS_THRESHOLD`，于是每轮都被判定为「压缩轮」，
+ * 提示词每轮都要求模型"提炼"，但模型拿到的是一堆 JSON，提炼完还是 JSON——死循环。
+ *
+ * ## 剥壳策略
+ *
+ * 不追求把 JSON 完整解析出来（模型的裸换行 JSON 本来就解析不了），而是**按正则抠字段**：
+ * 取出所有 `full` 文本与 `entries` 条目，以最长的一份 `full` 为基底
+ * （每份都是同一本日志的不同版本，最长的那本最全），再把基底里没有的条目补到顶部。
+ */
+export interface MemoryJsonStripResult {
+  /** 剥离后的纯文本记忆日志。 */
+  text: string;
+  /** true = 确实剥掉了外壳（调用方应据此写日志 / 落库覆盖）。 */
+  stripped: boolean;
+}
+
+/** JSON 字符串值的匹配：允许其中出现**裸换行**（模型吐的 JSON 未经转义）。 */
+const JSON_STRING_BODY = `((?:[^"\\\\]|\\\\.)*)`;
+
+/** 还原 JSON 字符串里的常见转义。 */
+function unescapeJsonString(s: string): string {
+  return s
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\r/g, "")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
+}
+
+/** 扫出一段文本里所有 `full` / `entries`（容错：模型吐的不规范 JSON 也能抠出来）。 */
+function scanJsonMemoryBlocks(text: string): { fulls: string[]; entries: string[] } {
+  const fulls: string[] = [];
+  const entries: string[] = [];
+  for (const m of text.matchAll(new RegExp(`"full"\\s*:\\s*"${JSON_STRING_BODY}"`, "g"))) {
+    const v = unescapeJsonString(m[1] ?? "").trim();
+    if (v) fulls.push(v);
+  }
+  for (const m of text.matchAll(/"entries"\s*:\s*\[([\s\S]*?)\]/g)) {
+    for (const q of (m[1] ?? "").matchAll(new RegExp(`"${JSON_STRING_BODY}"`, "g"))) {
+      const v = unescapeJsonString(q[1] ?? "").trim();
+      if (v) entries.push(v);
+    }
+  }
+  return { fulls, entries };
+}
+
+/**
+ * 若传入的是（或夹着）记忆 JSON 外壳，返回剥离后的纯文本日志。
+ *
+ * 非 JSON 形态（正常三行日志、玩家手写的散文）**原样返回**，`stripped=false`——
+ * 这个函数只认 `full` / `entries` 这两个键，不会误伤玩家的自由文本。
+ */
+export function stripMemoryJsonShell(raw: string): MemoryJsonStripResult {
+  const text = String(raw ?? "");
+  if (!text.trim()) return { text, stripped: false };
+  if (!/"(?:full|entries)"\s*:/.test(text)) return { text, stripped: false };
+
+  const { fulls, entries } = scanJsonMemoryBlocks(text);
+  if (fulls.length === 0 && entries.length === 0) return { text, stripped: false };
+
+  // 最长的一份 full = 最完整的那本日志。
+  let base = "";
+  for (const f of fulls) if (f.length > base.length) base = f;
+
+  const baseEntries = splitMemoryEntries(base);
+  const present = new Set(baseEntries.map(canonicalEntry));
+  const baseKeys = new Set(baseEntries.map(memoryEntryTimeKey).filter(Boolean));
+
+  const fresh: string[] = [];
+  for (const e of entries) {
+    const key = memoryEntryTimeKey(e);
+    if (key && baseKeys.has(key)) continue; // 基底已有同一时刻的条目，基底版优先
+    const c = canonicalEntry(e);
+    if (present.has(c)) continue;
+    present.add(c);
+    fresh.push(e);
+  }
+
+  const merged = fresh.length > 0 ? [...fresh, base].join("\n\n") : base;
+  if (!merged.trim()) return { text, stripped: false };
+  return { text: merged.trim(), stripped: true };
+}
 
 /**
  * 校验 AI 写回的整段记忆，产出可安全写入的文本。

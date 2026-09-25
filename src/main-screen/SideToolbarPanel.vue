@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef } from "vue";
 import type { WorldLocation } from "../role_core/types/worldLocation";
+import type { WorldTime } from "../role_core/worldTime";
 import { npcStore } from "../role_core/npcStore";
 import type { Npc } from "../role_core/Npc";
 import WorldMapModal from "./WorldMapModal.vue";
@@ -20,6 +21,8 @@ import { hasPendingWorldSettings, pendingProfileCount } from "../role_core/pendi
 
 const props = defineProps<{
   currentLocation?: WorldLocation | null;
+  /** 当前世界时间：新建角色卡时用作「上次见面时间」。 */
+  currentWorldTime?: WorldTime | null;
   testDisabled?: boolean;
 }>();
 
@@ -202,6 +205,8 @@ function onLoadSave(value: { id: string; payload: MjSavePayload }): void {
     />
     <CharacterArchiveModal
       :open="archiveModalOpen"
+      :current-location="props.currentLocation ?? null"
+      :current-world-time="props.currentWorldTime ?? null"
       @close="closeArchiveModal"
     />
     <WorldSettingsModal
@@ -260,7 +265,11 @@ function onLoadSave(value: { id: string; payload: MjSavePayload }): void {
   vertical-align: 1px;
 }
 
-/* 在场人物（置顶）：无外框、无标题，卡片尽可能大 */
+/* 在场人物（置顶）：无外框、无标题，卡片尽可能大
+   【2026-09-23】高度策略回到最朴素的一版：**整块滚动**。
+   中途试过「flex 分区 + 在场人物单独内部滚动」，矮屏上卡片区被压成一条缝、
+   信息直接看不见。故现在既不给列表写死 max-height、也不单独开滚动条，
+   卡片一律按原尺寸完整渲染，放不下就让整个侧栏滚（全局 .main-panel__body 是 overflow:auto）。 */
 .side-present {
   padding: 6px 6px 2px;
 }
@@ -289,12 +298,12 @@ function onLoadSave(value: { id: string; payload: MjSavePayload }): void {
   padding: 6px 2px;
 }
 
+/* 不给高度上限、也不单独开滚动条：卡片一律按原尺寸完整渲染，
+   放不下就让整个侧栏滚（见 .main-panel__body 的说明）。 */
 .side-present__list {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: min(46vh, 420px);
-  overflow-y: auto;
 }
 
 /* 卡片放大：头像由 46px 提到 88px；代价是压缩信息区，见下方血条。
@@ -335,4 +344,6 @@ function onLoadSave(value: { id: string; payload: MjSavePayload }): void {
   font-size: 0.72rem;
 }
 
+/* 功能按钮组：跟着整块一起滚（不再单独固定在底部。固定会让上面的卡片区被压扁，
+   信息看不见——玩家明确要求：允许滚动即可） */
 </style>

@@ -1,17 +1,32 @@
 import type { BattleCombatant, BattleSkill, BattleElixir, BattleEffect, SkillEffect, DamageType, ModifierType, CcType, StatusType, SummonTrigger } from "./types";
 import type { BattleTriggerEntry } from "../ai/state_generate";
-import type { GongfaSlotsState, EquippedSlotsState } from "../role_core/types/playInfo";
+import type { GongfaSlotsState, EquippedSlotsState, GongfaItemDefinition } from "../role_core/types/playInfo";
 import type { InventoryStackItem, ElixirItemDefinition } from "../role_core/types/itemInfo";
 import type { GongfaBattleEffect, LayerValue } from "../role_core/types/gongfa";
 import type { PrimaryStatKey } from "../role_core/types/playInfo";
-import { atLayer, atLayerFloat, resolveGongfaBattleEffectDesc, resolveGongfaLayer10 } from "../role_core/types/gongfa";
+import {
+  atLayer,
+  atLayerFloat,
+  resolveGongfaBattleEffectDesc,
+  gradeSkillSrMult,
+  gongfaMpPct,
+  gongfaMpCost,
+  bvTypeMult,
+  systemBvMult,
+} from "../role_core/types/gongfa";
+import type { GongfaSystem } from "../role_core/types/gongfa";
 import { protagonist } from "../role_core/Protagonist";
 import { Npc } from "../role_core/Npc";
 import { npcStore } from "../role_core/npcStore";
 import { gameLog } from "../log/gameLog";
 import { GONGFA_SLOT_COUNT, computeLinggenCombatBonuses } from "../role_core/types/gameConstants";
 import { gongfaMaxLayer } from "../role_core/types/itemTier";
-import { gongfaCombatMult, clampGongfaMastery } from "../role_core/realmUtils";
+import {
+  gongfaCombatMultAt,
+  gongfaContLayer,
+  gongfaLayer10At,
+} from "../role_core/realmUtils";
+import { gongfaBvValue } from "../role_core/realmScale";
 import { treasureTierFactor, resolveItemTier, applyElixirTierSuppression, gongfaTierFactor } from "../role_core/types/itemTier";
 import { generateId as generateEffectId } from "./formulas";
 import { BASE_CRIT_DMG } from "./constants";
@@ -21,30 +36,60 @@ function generateId(team: "ally" | "enemy", index: number): string {
 }
 
 /**
- * 战斗效果倍率 + 层级曲线位置。
+ * 【2026-09-25 v4】战斗倍率与目录取样位置一律走**连续层号**。
  *
- * 功法的层数上限由阶层决定（凡人3层 ~ 化神10层），故倍率按**修炼进度比例**插值，
- * 而数值曲线的取样位置要把「第 3/5 层」映射到 10 层基准曲线的连续位置。
+ * 旧口径是「按整数层在 [1, 上限] 之间插值」，层内经验在升级前完全不体现在数值上。
+ * 现在每颗灵石都立刻生效，层数退化为里程碑。
+ *
+ * @returns mult 战斗倍率（练气满层 1.45 ~ 化神满层 2.35）；
+ *          layer10 目录数值曲线的取样位置（1~10）。
  */
-function gongfaLayerContext(gf: { mastery?: number; tier?: string }): { mult: number; layer10: number } {
-  const maxLayer = gongfaMaxLayer(gf.tier);
-  const mastery = clampGongfaMastery(gf.mastery ?? 1, maxLayer);
-  return { mult: gongfaCombatMult(mastery, maxLayer), layer10: resolveGongfaLayer10(mastery, maxLayer) };
+function gongfaLayerContext(gf: GongfaItemDefinition): { mult: number; layer10: number; contLayer: number } {
+  const contLayer = gongfaContLayer(gf);
+  return {
+    mult: gongfaCombatMultAt(contLayer),
+    layer10: gongfaLayer10At(contLayer),
+    contLayer,
+  };
 }
 
+/**
+ * 技能的**绝对点数**底盘（`baseValue` / `summonDamage` / 定值 `tickValue`）。
+ *
+ * 【2026-09-25 改】由「目录死数字 × 施法者境界缩放」改为
+ * **`realmScale.gongfaBvValue(连续层号)`**：底盘**只认层号**（同层同值），
+ * 不看使用者境界 —— 旧口径在练气期只有 0.0091 的系数，把 250~1500 的点数打到 6 点，
+ * 等于归零，练气期技能全程弱于普攻；而按施法者境界缩放又会废掉自然淘汰
+ * （练气功法带到化神被算成化神量级，永远淘汰不掉）。
+ *
+ * 底盘**不乘 `masteryMult`**（曲线已含层号成长，再乘会双重成长）；
+ * `scalingRatio × 属性` 那部分继续乘（它是"练得更深 + 堆属性"的奖励）。
+ *
+ * @param bvValue 层号底盘值，由调用方 `gongfaBvValue(contLayer)` 算好。
+ * @param system 功法体系，用于体系系数（只影响直接造成伤害的条目）。
+ */
 function bakeScalingValue(
   eff: GongfaBattleEffect,
   getStat: (key: string) => number,
   masteryMult: number,
   layer: number,
+  bvValue: number,
+  gradeMult: number = 1,
+  system?: GongfaSystem | null,
 ): number | undefined {
   if (!("baseValue" in eff) || !("scalingRatio" in eff) || !("scalingStat" in eff)) {
     return undefined;
   }
-  const bv = atLayer(eff.baseValue as LayerValue, layer);
-  const sr = atLayerFloat(eff.scalingRatio as LayerValue, layer);
+  const bv = bvValue * bvTypeMult(eff.type) * (isDamageEffectType(eff.type) ? systemBvMult(system) : 1);
+  const sr = atLayerFloat(eff.scalingRatio as LayerValue, layer) * gradeMult;
   const stat = getStat(eff.scalingStat);
-  return Math.round((bv + sr * stat) * masteryMult);
+  return Math.round(bv + sr * stat * masteryMult);
+}
+
+/** 直接造成伤害的效果类型（只有这些受体系系数影响）。 */
+function isDamageEffectType(t: string): boolean {
+  return t === "dealDamage" || t === "dealDamageExecute"
+    || t === "dealDamagePierce" || t === "dealDamageBySummon";
 }
 
 function convertBattleEffectToSkillEffect(
@@ -52,8 +97,11 @@ function convertBattleEffectToSkillEffect(
   getStat: (key: string) => number,
   masteryMult: number,
   layer: number,
+  bvValue: number,
+  gradeMult: number = 1,
+  system?: GongfaSystem | null,
 ): SkillEffect {
-  const v = bakeScalingValue(eff, getStat, masteryMult, layer);
+  const v = bakeScalingValue(eff, getStat, masteryMult, layer, bvValue, gradeMult, system);
 
   switch (eff.type) {
     case "dealDamage":
@@ -77,7 +125,18 @@ function convertBattleEffectToSkillEffect(
     case "applyCc":
       return { type: "applyCc", ccType: eff.ccType as CcType, chance: atLayerFloat(eff.chance, layer), duration: eff.duration };
     case "applyStatus":
-      return { type: "applyStatus", statusType: eff.statusType as StatusType, tickValue: atLayer(eff.tickValue, layer), isPercent: eff.isPercent, duration: eff.duration, maxStacks: eff.maxStacks };
+      // 定值型跳伤同样是绝对点数，走层号底盘（按跳数摊薄）；
+      // 百分比型（最大生命 5%）天然水涨船高，不能乘。
+      return {
+        type: "applyStatus",
+        statusType: eff.statusType as StatusType,
+        tickValue: eff.isPercent
+          ? atLayer(eff.tickValue, layer)
+          : Math.round(bvValue * bvTypeMult("applyStatus")),
+        isPercent: eff.isPercent,
+        duration: eff.duration,
+        maxStacks: eff.maxStacks,
+      };
     case "shield":
       return { type: "shield", value: v ?? 0 };
     case "counter":
@@ -101,9 +160,9 @@ function convertBattleEffectToSkillEffect(
     case "revive":
       return { type: "revive", hpPercent: eff.hpPercent };
     case "summon": {
-      const baseDmg = atLayer(eff.summonDamage, layer);
+      const baseDmg = bvValue * bvTypeMult("summon");
       const scalingDmg = eff.scalingRatio != null && eff.scalingStat
-        ? atLayerFloat(eff.scalingRatio as LayerValue, layer) * getStat(eff.scalingStat)
+        ? atLayerFloat(eff.scalingRatio as LayerValue, layer) * gradeMult * getStat(eff.scalingStat)
         : 0;
       const dmg = Math.round(baseDmg + scalingDmg);
       const count = eff.countPerCast != null ? atLayer(eff.countPerCast as LayerValue, layer) : 1;
@@ -146,6 +205,8 @@ function buildBattleSkills(
   getStat: (key: string) => number,
   cooldownReduce: number,
   realmMajor?: string,
+  realmMinor?: string,
+  maxMp: number = 0,
 ): BattleSkill[] {
   const skills: BattleSkill[] = [];
 
@@ -153,13 +214,16 @@ function buildBattleSkills(
     if (!gf || !gf.function) continue;
     if (gf.function.type !== "主动") continue;
 
-    // 层数上限由阶层决定：倍率按进度比例插值，数值曲线按连续层号取样。
-    const { mult, layer10: layer } = gongfaLayerContext(gf);
-    // 功法阶层压制与属性加成同源：凡人武功在练气期只剩一成，筑基期归零。
+    // 连续层号：倍率与目录取样都按它走，层内经验立刻生效。
+    const { mult, layer10: layer, contLayer } = gongfaLayerContext(gf);
+    // 绝对点数的底盘：只认层号（同层同值），不看使用者境界。
+    const bvValue = gongfaBvValue(contLayer);
+    // 仅凡人 tier 有衰减（练气期 40%、筑基起归零），练气及以上恒 1。
     const tierMult = gongfaTierFactor(gf.tier, realmMajor);
     const masteryMult = mult * tierMult;
+    const gradeMult = gradeSkillSrMult(gf.grade);
     const effects = gf.function.battleEffects.map(eff =>
-      convertBattleEffectToSkillEffect(eff, getStat, masteryMult, layer),
+      convertBattleEffectToSkillEffect(eff, getStat, masteryMult, layer, bvValue, gradeMult, gf.system),
     );
 
     const hasOffensive = gf.function.battleEffects.some(isTargetEnemy);
@@ -167,13 +231,17 @@ function buildBattleSkills(
 
     const getStatForDesc = (key: PrimaryStatKey) => getStat(key);
     const desc = gf.function.battleEffects
-      .map(e => resolveGongfaBattleEffectDesc(e, getStatForDesc, masteryMult, layer, false))
+      .map(e => resolveGongfaBattleEffectDesc(
+        e, getStatForDesc, masteryMult, layer, false, false, false, bvValue, gradeMult, gf.system,
+      ))
       .join("；");
 
+    // 【2026-09-25 v4】蓝耗改「占自身最大法力百分比」，目录 mpCost 绝对点数不再使用。
+    const mpPct = gongfaMpPct(gf.grade, contLayer);
     skills.push({
       name: gf.name,
       desc,
-      mpCost: atLayer(gf.function.mpCost ?? 0, layer),
+      mpCost: gongfaMpCost(maxMp, mpPct),
       actionCost: 100,
       cooldown: Math.max(0, (gf.function.cooldown ?? 0) - cooldownReduce),
       needTarget: hasNeedTarget,
@@ -192,8 +260,11 @@ function convertBattleEffectToInitEffect(
   layer: number,
   effectName: string,
   combatantId: string,
+  bvValue: number = 0,
+  gradeMult: number = 1,
+  system?: GongfaSystem | null,
 ): BattleEffect {
-  const v = bakeScalingValue(eff, getStat, masteryMult, layer);
+  const v = bakeScalingValue(eff, getStat, masteryMult, layer, bvValue, gradeMult, system);
   const base: BattleEffect = {
     id: generateEffectId(),
     name: effectName,
@@ -211,7 +282,11 @@ function convertBattleEffectToInitEffect(
       return { ...base, category: "cc", ccType: eff.ccType as CcType, remainingDuration: eff.duration };
     case "applyStatus": {
       const isDoT = eff.statusType === "poison" || eff.statusType === "burn" || eff.statusType === "bleed" || eff.statusType === "mpDrain";
-      return { ...base, category: isDoT ? "dot" : "hot", tickValue: atLayer(eff.tickValue, layer), tickIsPercent: eff.isPercent, tickResource: eff.statusType === "mpDrain" ? "mp" : "hp", statusType: eff.statusType as StatusType, remainingDuration: eff.duration, maxStacks: eff.maxStacks };
+      // 定值跳伤走层号底盘（按跳数摊薄）；百分比型不动（isPercent 分支天然水涨船高）。
+      const tick = eff.isPercent
+        ? atLayer(eff.tickValue, layer)
+        : Math.round(bvValue * bvTypeMult("applyStatus"));
+      return { ...base, category: isDoT ? "dot" : "hot", tickValue: tick, tickIsPercent: eff.isPercent, tickResource: eff.statusType === "mpDrain" ? "mp" : "hp", statusType: eff.statusType as StatusType, remainingDuration: eff.duration, maxStacks: eff.maxStacks };
     }
     case "shield":
       return { ...base, specialType: "shield", specialValue: v ?? 0, remainingDuration: 99 };
@@ -251,6 +326,7 @@ function extractPassiveEffects(
   getStat: (key: string) => number,
   combatantId: string,
   realmMajor?: string,
+  realmMinor?: string,
 ): BattleEffect[] {
   const effects: BattleEffect[] = [];
 
@@ -258,10 +334,15 @@ function extractPassiveEffects(
     if (!gf || !gf.function) continue;
     if (gf.function.type !== "被动") continue;
 
-    const { mult, layer10: layer } = gongfaLayerContext(gf);
+    const { mult, layer10: layer, contLayer } = gongfaLayerContext(gf);
+    // 被动（开局护盾、反击、持续恢复）的绝对点数同样走层号底盘。
+    const bvValue = gongfaBvValue(contLayer);
     const masteryMult = mult * gongfaTierFactor(gf.tier, realmMajor);
+    const gradeMult = gradeSkillSrMult(gf.grade);
     for (const eff of gf.function.battleEffects) {
-      const be = convertBattleEffectToInitEffect(eff, getStat, masteryMult, layer, gf.function.name, combatantId);
+      const be = convertBattleEffectToInitEffect(
+        eff, getStat, masteryMult, layer, gf.function.name, combatantId, bvValue, gradeMult, gf.system,
+      );
       be.hidden = true;
       effects.push(be);
     }
@@ -274,7 +355,8 @@ function extractPassiveEffects(
  * 提取已装备法宝的百分比被动，并注入为战斗 modifier。
  *
  * 每条词条的数值会先按 {@link treasureTierFactor} 做跨阶压制：
- * 低阶法宝按 0.65^Δ 削弱；高阶法宝被低阶修士使用时受器灵封印；凡人阶走专属衰减。
+ * 低阶法宝按 0.65^Δ 削弱；高阶法宝被低阶修士使用时按 0.70^Δ 受器灵封印
+ * （2026-09-24 由 0.35 上调）；凡人阶走专属衰减。
  *
  * @param equippedSlots 已装备法宝槽。
  * @param combatantId 战斗单位 id。
@@ -290,7 +372,7 @@ function extractTreasurePassiveEffects(
   for (const tr of equippedSlots) {
     if (!tr || !tr.function) continue;
     if (!("modifiers" in tr.function)) continue;
-    // 法宝跨阶压制（treasureTierFactor）：低阶 0.65^Δ、高阶器灵封印、凡人阶专属衰减。
+    // 法宝跨阶压制（treasureTierFactor）：低阶 0.65^Δ、高阶 0.70^Δ、凡人阶专属衰减。
     const tierF = treasureTierFactor(resolveItemTier(tr.tier, tr.grade), realmMajor);
     for (const mod of tr.function.modifiers) {
       const rawType = mod.modifierType as string;
@@ -353,10 +435,10 @@ function createProtagonistCombatant(): BattleCombatant | null {
   const primaryStats = p.getPrimaryStats();
   const getStat = (key: string) => (primaryStats as Record<string, number>)[key] ?? 0;
   const linggenBonus = computeLinggenCombatBonuses(p.linggen, p.realm.major);
-  const skills = buildBattleSkills(p.gongfaSlots, getStat, linggenBonus.cooldownReduce, p.realm.major);
+  const skills = buildBattleSkills(p.gongfaSlots, getStat, linggenBonus.cooldownReduce, p.realm.major, p.realm.minor, p.maxMp);
   const elixirs = extractRecoveryElixirs(p.inventorySlots, p.realm.major);
   const passiveEffects: BattleEffect[] = [
-    ...extractPassiveEffects(p.gongfaSlots, getStat, generateId("ally", 0), p.realm.major),
+    ...extractPassiveEffects(p.gongfaSlots, getStat, generateId("ally", 0), p.realm.major, p.realm.minor),
     ...extractTreasurePassiveEffects(p.equippedSlots, generateId("ally", 0), p.realm.major),
   ];
 
@@ -407,11 +489,11 @@ function createNpcCombatant(
   const primaryStats = npc.getPrimaryStats();
   const getStat = (key: string) => (primaryStats as Record<string, number>)[key] ?? 0;
   const linggenBonus = computeLinggenCombatBonuses(npc.linggen, npc.realm.major);
-  const skills = buildBattleSkills(npc.gongfaSlots, getStat, linggenBonus.cooldownReduce, npc.realm.major);
+  const skills = buildBattleSkills(npc.gongfaSlots, getStat, linggenBonus.cooldownReduce, npc.realm.major, npc.realm.minor, npc.maxMp);
   const elixirs = extractRecoveryElixirs(npc.inventorySlots, npc.realm.major);
   const id = generateId(team, index);
   const passiveEffects: BattleEffect[] = [
-    ...extractPassiveEffects(npc.gongfaSlots, getStat, id, npc.realm.major),
+    ...extractPassiveEffects(npc.gongfaSlots, getStat, id, npc.realm.major, npc.realm.minor),
     ...extractTreasurePassiveEffects(npc.equippedSlots, id, npc.realm.major),
   ];
 
@@ -453,11 +535,18 @@ function createNpcCombatant(
     linggenHealMult: linggenBonus.healMult,
     linggenShieldMult: linggenBonus.shieldMult,
     sourceNpcName: npc.displayName,
+    sourceNpcId: npc.id,
     realm: { ...npc.realm },
     powerTier: npc.powerTier,
     identity: npc.identity,
     avatarUrl: npc.avatarUrl,
   };
+}
+
+/** 按 npcId 精确回查参战者；id 未命中（旧触发名单/AI 未带 id）时按 displayName 兜底。 */
+function resolveCombatantNpc(npcId: string | undefined, displayName: string): Npc | undefined {
+  const byId = npcId ? npcStore.getNpcById(npcId) : undefined;
+  return byId ?? npcStore.getNpc(displayName);
 }
 
 export function createBattleCombatants(
@@ -479,7 +568,7 @@ export function createBattleCombatants(
   let allyIndex = 1;
   for (const ally of triggerEntry.allies) {
     if (ally.roleHint === "主角") continue;
-    const npc = npcStore.getNpc(ally.displayName);
+    const npc = resolveCombatantNpc(ally.npcId, ally.displayName);
     if (!npc || npc.isDead) {
       gameLog.warn(`[initBattle] 友方NPC "${ally.displayName}" 未在npcStore中找到或已死亡`);
       continue;
@@ -491,7 +580,7 @@ export function createBattleCombatants(
 
   let enemyIndex = 0;
   for (const enemy of triggerEntry.enemies) {
-    const npc = npcStore.getNpc(enemy.displayName);
+    const npc = resolveCombatantNpc(enemy.npcId, enemy.displayName);
     if (!npc || npc.isDead) {
       gameLog.warn(`[initBattle] 敌方NPC "${enemy.displayName}" 未在npcStore中找到或已死亡`);
       continue;

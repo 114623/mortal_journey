@@ -45,8 +45,10 @@ import {
 } from "../role_core/worldTime";
 import { getSpiritStoneCount } from "../role_core/CharacterInventory";
 import { getGongfaMasteryProgress } from "./protagonistPanelDisplay";
+import { isMortalPeakLocked } from "../role_core/realmUtils";
 import { writeActiveSave } from "../save/gameSave";
 import { storyStore } from "../role_core/storyStore";
+import { formatBuffForDisplay, pruneExpiredBuffs } from "../role_core/types/characterBuff";
 import { generateProtagonistPortrait, isImageApiConfigured } from "../image_generate";
 import PortraitHistoryModal from "./PortraitHistoryModal.vue";
 import CharacterProfileModal from "./CharacterProfileModal.vue";
@@ -101,6 +103,30 @@ const inventoryBagDisplaySlots = computed(() =>
   props.protagonist ? getInventoryBagDisplaySlots(props.protagonist.inventorySlots) : [],
 );
 const shouyuanWarning = computed(() => getShouyuanWarningLevel(props.protagonist, props.worldTimeBaseline, props.worldTime));
+
+/** 无灵根硬锁：修为可满，境界永远停在凡人后期。 */
+const mortalPeakLocked = computed(() => {
+  const p = props.protagonist;
+  if (!p) return false;
+  return isMortalPeakLocked(p.realm.major, p.realm.minor, p.linggen);
+});
+
+/**
+ * 持久状态（buff / debuff）展示行，如 `气血亏虚（血上限 −30%，余 23 天）`。
+ *
+ * 这里只做**纯过滤**（`pruneExpiredBuffs` 不改原数组）——真正的清理在世界时间推进
+ * 与战斗结算时做；展示层过滤是为了「已到期但还没触发清理」的那段时间不显示脏数据。
+ */
+const buffLines = computed(() => {
+  const p = props.protagonist;
+  if (!p || p.buffs.length === 0) return [];
+  return pruneExpiredBuffs(p.buffs, props.worldTime).kept.map(b => ({
+    id: b.id,
+    kind: b.kind,
+    desc: b.desc || b.name,
+    text: formatBuffForDisplay(b, props.worldTime),
+  }));
+});
 
 const linggenTooltip = computed(() => {
   const p = props.protagonist;
@@ -253,7 +279,7 @@ function onGongfaSlotClick(index: number) {
   const statGetter = () => getGongfaScalingStat(p, cell);
   const nameGetter = () => getGongfaScalingStatName(cell);
   const dsGetter = () => getGongfaDerivedStats(p);
-  openDetail(buildGongfaDetailPayload(cell, { type: "bar", gongfaIndex: index }, p.linggen, statGetter, nameGetter, dsGetter, computeLinggenCombatBonuses(p.linggen, p.realm.major).cooldownReduce));
+  openDetail(buildGongfaDetailPayload(cell, { type: "bar", gongfaIndex: index }, p.linggen, statGetter, nameGetter, dsGetter, computeLinggenCombatBonuses(p.linggen, p.realm.major).cooldownReduce, p.realm));
 }
 
 function onBagSlotClick(index: number) {
@@ -264,7 +290,7 @@ function onBagSlotClick(index: number) {
   const gfg = (gf: GongfaItemDefinition) => getGongfaScalingStat(p, gf);
   const sng = (gf: GongfaItemDefinition) => getGongfaScalingStatName(gf);
   const dsg = (gf: GongfaItemDefinition) => getGongfaDerivedStats(p);
-  openDetail(buildInventoryStackDetailPayload(cell, index, p.linggen, gfg, sng, dsg, computeLinggenCombatBonuses(p.linggen, p.realm.major).cooldownReduce, p.realm.major));
+  openDetail(buildInventoryStackDetailPayload(cell, index, p.linggen, gfg, sng, dsg, computeLinggenCombatBonuses(p.linggen, p.realm.major).cooldownReduce, p.realm.major, p.realm.minor));
 }
 
 function onDetailAction(a: ProtagonistDetailAction) {
@@ -389,7 +415,7 @@ function onSlotKeydown(e: KeyboardEvent, fn: () => void) {
               <button
                 type="button"
                 class="mj-player-profile-btn"
-                title="编辑角色设定：性格 / 外貌 / 记忆"
+                title="编辑角色设定：基本信息 / 性格 / 外貌 / 记忆"
                 @click.stop="openProfileModal"
               >📝</button>
             </div>
@@ -428,6 +454,9 @@ function onSlotKeydown(e: KeyboardEvent, fn: () => void) {
             </div>
           </template>
           <p v-else class="mj-player-info-muted">当前境界无修为阶段需求表项。</p>
+          <p v-if="mortalPeakLocked" class="mj-player-info-muted" style="color: #c62828">
+            无灵根·无法引气入体，境界止步凡人后期
+          </p>
         </div>
 
         <div class="mj-player-identity">
@@ -474,6 +503,17 @@ function onSlotKeydown(e: KeyboardEvent, fn: () => void) {
           <div class="mj-bar" role="progressbar" :aria-valuenow="Math.round(hpMp.mpPct)">
             <div class="mj-bar-fill mj-bar-fill--mp" :style="{ width: hpMp.mpPct + '%' }" />
           </div>
+        </div>
+
+        <div v-if="buffLines.length" class="mj-player-status-block">
+          <h3 class="mj-attr-section-title">状态</h3>
+          <p
+            v-for="b in buffLines"
+            :key="b.id"
+            class="mj-buff-line"
+            :class="b.kind === 'buff' ? 'mj-buff-line--good' : 'mj-buff-line--bad'"
+            :title="b.desc"
+          >{{ b.text }}</p>
         </div>
 
         <div class="mj-combat-stats">
@@ -608,5 +648,18 @@ function onSlotKeydown(e: KeyboardEvent, fn: () => void) {
 .mj-player-profile-btn {
   padding: 8px 10px;
   font-size: 0.82rem;
+}
+
+/* 持久状态：紧随血/法条，因为首版 buff 只影响这两条上限。 */
+.main-panel--player .mj-buff-line {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.main-panel--player .mj-buff-line--bad {
+  color: #c62828;
+}
+.main-panel--player .mj-buff-line--good {
+  color: #4fc3f7;
 }
 </style>

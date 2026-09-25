@@ -26,6 +26,12 @@ import type { GradeDropRate, ItemGrade } from "./itemInfo";
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. 境界主属性表（按阶段索引：凡人初期~化神后期，共 18 行）
 //    hp/mp 为该境界基础血量/法力；8个主属性为基础值
+//
+//    【跨大境界门槛 · 2026-09-24】每个大境界（同小境界对比，如结丹初→元婴初）
+//    的攻防血必须 ≥ 2.5×，综合战力指数 sqrt(气血 × 净伤 × 身法) 亦 ≥ 2.5×。
+//    唯一例外是**身法/悟性**：行动条增速是线性的，跟着翻 2.5 倍会让高阶一回合
+//    连出十几次手，因此刻意压到 1.5~2.0×，由攻防的倍率补足综合指数。
+//    调整这张表时务必用「同小境界对比」复核 5 段跨越，别只看相邻那一步。
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const REALM_PRIMARY_STATS_TABLE = [
@@ -40,17 +46,20 @@ export const REALM_PRIMARY_STATS_TABLE = [
   { hp: 1500,   mp: 750,   physique: 35,  spirit: 35,  strength: 165,  perception: 165,  guard: 18,  resistance: 18,  agility: 10, insight: 10 },
   { hp: 2000,   mp: 1000,  physique: 50,  spirit: 50,  strength: 250,  perception: 250,  guard: 25,  resistance: 25,  agility: 13, insight: 13 },
   { hp: 3000,   mp: 1500,  physique: 65,  spirit: 65,  strength: 325,  perception: 325,  guard: 33,  resistance: 33,  agility: 17, insight: 17 },
-  { hp: 4000,   mp: 2000,  physique: 85,  spirit: 85,  strength: 425,  perception: 425,  guard: 43,  resistance: 43,  agility: 22, insight: 22 },
-  { hp: 5000,   mp: 2500,  physique: 105, spirit: 105, strength: 525, perception: 525, guard: 53,  resistance: 53,  agility: 27, insight: 27 },
-  { hp: 10000,  mp: 5000,  physique: 125, spirit: 125, strength: 625, perception: 625, guard: 63,  resistance: 63,  agility: 32, insight: 32 },
-  { hp: 13000,  mp: 6500,  physique: 150, spirit: 150, strength: 750, perception: 750, guard: 75,  resistance: 75,  agility: 37, insight: 37 },
-  { hp: 15000,  mp: 7500,  physique: 175, spirit: 175, strength: 875, perception: 875, guard: 88,  resistance: 88,  agility: 43, insight: 43 },
-  // 化神（2026-09 重平衡）：原值在元婴后→化神后只涨 14%（劲力 875→1000），
-  // 顶部严重趋平，导致最高境界毫无成长感。现按「元婴后期基数 × 1.25 / 1.5 / 1.75」重排，
-  // 使后期→后期的整体节奏为 ×7.5 / ×3.33 / ×2.10 / ×1.67 / ×1.75，不再塌陷。
-  { hp: 22000,  mp: 11000, physique: 220, spirit: 220, strength: 1090, perception: 1090, guard: 110, resistance: 110, agility: 54, insight: 54 },
-  { hp: 27000,  mp: 13500, physique: 265, spirit: 265, strength: 1310, perception: 1310, guard: 132, resistance: 132, agility: 65, insight: 65 },
-  { hp: 32000,  mp: 16000, physique: 305, spirit: 305, strength: 1530, perception: 1530, guard: 154, resistance: 154, agility: 75, insight: 75 },
+  { hp: 4000,   mp: 2000,  physique: 88,  spirit: 88,  strength: 425,  perception: 425,  guard: 45,  resistance: 45,  agility: 22, insight: 22 },
+  { hp: 5000,   mp: 2500,  physique: 125, spirit: 125, strength: 625, perception: 625, guard: 63,  resistance: 63,  agility: 27, insight: 27 },
+  // 元婴（2026-09-24 重排）：旧值相对结丹只涨 1.92×（劲力 325→625），跨大境界的
+  // 质变感不足。现按「结丹同阶 × 2.5~2.6」重排（气血 2.6×、劲力 2.5×、身法 2.0×）。
+  { hp: 8000,   mp: 4000,  physique: 170, spirit: 170, strength: 850,  perception: 850,  guard: 85,  resistance: 85,  agility: 34, insight: 34 },
+  { hp: 10500,  mp: 5200,  physique: 220, spirit: 220, strength: 1100, perception: 1100, guard: 115, resistance: 115, agility: 44, insight: 44 },
+  { hp: 13000,  mp: 6500,  physique: 315, spirit: 315, strength: 1575, perception: 1575, guard: 160, resistance: 160, agility: 54, insight: 54 },
+  // 化神（2026-09-24 二次重排）：旧表按「元婴后期基数 ×1.25/1.5/1.75」排，解决了
+  // 顶部趋平，但跨大境界只有 1.74×，仍低于 2.5× 门槛。现改为「元婴同阶 × 2.5~2.8」。
+  // 身法/悟性刻意只给 1.57~1.76×——行动条增速是线性的，跟着攻击属性一起翻 2.5 倍
+  // 会让高阶在一回合内连续出手十几次，战斗直接失去回合感。
+  { hp: 20000,  mp: 10000, physique: 440, spirit: 440, strength: 2200, perception: 2200, guard: 220, resistance: 220, agility: 60, insight: 60 },
+  { hp: 26500,  mp: 13000, physique: 620, spirit: 620, strength: 3100, perception: 3100, guard: 310, resistance: 310, agility: 72, insight: 72 },
+  { hp: 33000,  mp: 16500, physique: 790, spirit: 790, strength: 3950, perception: 3950, guard: 400, resistance: 400, agility: 85, insight: 85 },
 ] as const;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -325,7 +334,6 @@ export function gradeRangeForPowerTier(powerTier: string | null | undefined): Gr
 // ═══════════════════════════════════════════════════════════════════════════
 // 10. 特效数值体系
 //     GRADE_INDEX: 品阶中文名→数组索引的映射，用于各类品阶表的查表
-//     GONGFA_MP_COST_BY_GRADE: 法修功法按品阶的法力消耗基础值（体修×0.2）
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const GRADE_INDEX: Readonly<Record<string, number>> = {
@@ -337,7 +345,9 @@ export const GRADE_INDEX: Readonly<Record<string, number>> = {
   "神品": 5,
 };
 
-export const GONGFA_MP_COST_BY_GRADE = [15, 30, 60, 120, 250, 500] as const;
+/* 【2026-09-25 v4 删除】原 `GONGFA_MP_COST_BY_GRADE`（死常量，无任何引用）。
+ * 法力消耗已改为「占自身最大法力百分比」（见 `gongfa.GONGFA_MP_PCT_BY_GRADE`），
+ * 与品阶固定点数脱钩。 */
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 12. 功法品阶修炼速度倍率
@@ -359,6 +369,7 @@ export const GONGFA_GRADE_CULTIVATION_MULT: Readonly<Record<string, number>> = {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const LINGGEN_CULTIVATION_MULT: Readonly<Record<number, number>> = {
+  0: 0.2,
   1: 1.0,
   2: 0.8,
   3: 0.7,
@@ -369,13 +380,50 @@ export const LINGGEN_CULTIVATION_MULT: Readonly<Record<number, number>> = {
 // ═══════════════════════════════════════════════════════════════════════════
 // 14. 功法修炼进度阈值（从第 N 层升到第 N+1 层所需经验）
 //
-//     基准曲线为 10 层功法的 9 段阈值（合计 263,500）。
-//     功法层数上限由阶层决定（凡人3层 ~ 化神10层，见
-//     `itemTier.GONGFA_MAX_LAYER_BY_TIER`），阈值按上限层数**等比重采样**：
-//     段数变少时总额按段数等比缩放（每层平均成本不变），形状保持"前松后紧"。
+//     【2026-09-25 v4】改为**全阶层统一曲线**：同层同价，与功法阶层无关。
+//     18 段（对应化神上限 19 层），单调递增、前松后紧。
+//
+//     校准依据：各境界修为总预算（练气 6,000 / 筑基 37,500 / 结丹 152,500 /
+//     元婴 475,000 / 化神 1,200,000），两组锚点：
+//       · cap-1 层累计 = 本境预算 40%  → 一境界可养两门到「上限-1」；
+//         同境界内任何功法可达层数相同，是曲线的自然推论而非分档巧合。
+//       · 满层累计 ≈ 本境预算 53%~107% → 本境练满要么勉强要么差一口气，
+//         正常节奏是突破到下一境界后顺手补满。
+//       | 阶层(上限) | cap-1 | 累计      | 占本境 | 满层 | 累计      | 占本境 |
+//       | 练气(7)    | L6    | 2,400     | 40%    | L7   | 6,400     | 107%   |
+//       | 筑基(10)   | L9    | 15,000    | 40%    | L10  | 30,000    | 80%    |
+//       | 结丹(13)   | L12   | 61,000    | 40%    | L13  | 100,000   | 66%    |
+//       | 元婴(16)   | L15   | 190,000   | 40%    | L16  | 250,000   | 53%    |
+//       | 化神(19)   | L18   | 480,000   | 40%    | L19  | 1,080,000 | 90%    |
+//
+//     同层同价的另一层意义：**继承机制经验 1:1 连续**——统一曲线下投入经验与
+//     曲线位置一一对应，源功法的层数与层内经验可原样复制（见 `inheritGongfaProgress`）。
+//
 //     取用走 {@link getGongfaMasteryThreshold}（realmUtils），勿直接索引本表。
 // ═══════════════════════════════════════════════════════════════════════════
 
+/**
+ * 统一经验曲线：第 N→N+1 层所需经验，共 18 段（L1→L19）。
+ *
+ * 各功法取**前 `maxLayer-1` 段**：凡人 3 层取 2 段、练气 7 层取 6 段、
+ * 化神 19 层取全部 18 段。曲线本身与阶层无关。
+ */
+export const GONGFA_MASTERY_CURVE = [
+  200, 300, 400, 600, 900,             // L1→L6   （累计 2,400 = 练气预算 40%）
+  4_000, 4_200, 4_400, 15_000,         // L6→L10  （L9 累计 15,000 = 筑基 40%）
+  15_000, 16_000, 39_000,              // L10→L13 （L12 累计 61,000 = 结丹 40%）
+  43_000, 47_000, 60_000,              // L13→L16 （L15 累计 190,000 = 元婴 40%）
+  110_000, 120_000, 600_000,           // L16→L19 （L18 累计 480,000 = 化神 40%）
+] as const;
+
+/**
+ * 旧基准表：10 层功法的 9 段阈值（合计 263,500）。
+ *
+ * 【2026-09-25 v4】**已退出主流程**：全阶层统一曲线（{@link GONGFA_MASTERY_CURVE}）
+ * 覆盖 3~19 层的全部情形，包括缺 tier 的老功法（回退上限 10，与筑基同价）。
+ * 本表现在只作为**非法 maxLayer（>19）的兜底**，以及 {@link GONGFA_MASTERY_BUDGET_10}
+ * 的历史口径参考；待老存档全部补上 tier 后可整体删除。
+ */
 export const GONGFA_MASTERY_THRESHOLDS = [
   500, 1000, 2000, 5000, 10000, 25000, 50000, 70000, 100000,
 ] as const;
@@ -383,75 +431,41 @@ export const GONGFA_MASTERY_THRESHOLDS = [
 /** 基准阈值总额（10 层功法的完整爬坡预算）。 */
 export const GONGFA_MASTERY_BUDGET_10 = 263_500;
 
-/** 单段阈值的最小值，避免重采样后出现过小的段（如 100 层时退化为 0）。 */
-const MASTERY_THRESHOLD_MIN = 100;
-
-const thresholdCache = new Map<number, readonly number[]>();
-
-/** 基准曲线的**累计**占比（长度 10，首尾为 0 与 1），用于按进度比例切分段。 */
-const BASE_CUMULATIVE: readonly number[] = (() => {
-  const out: number[] = [0];
-  let acc = 0;
-  for (const v of GONGFA_MASTERY_THRESHOLDS) {
-    acc += v;
-    out.push(acc / GONGFA_MASTERY_BUDGET_10);
-  }
-  return out;
-})();
-
-/** 在累计曲线上按连续索引取样（索引范围 0 ~ 9）。 */
-function sampleCumulative(idx: number): number {
-  const n = BASE_CUMULATIVE.length;
-  const pos = Math.max(0, Math.min(idx, n - 1));
-  const i0 = Math.floor(pos);
-  const i1 = Math.min(n - 1, i0 + 1);
-  const f = pos - i0;
-  return BASE_CUMULATIVE[i0] + (BASE_CUMULATIVE[i1] - BASE_CUMULATIVE[i0]) * f;
-}
-
 /**
- * 按功法的**层数上限**生成阈值表：共 `maxLayer - 1` 段（上限 10 层时即基准表本身）。
+ * 按功法的**层数上限**生成阈值表：统一曲线的前 `maxLayer - 1` 段。
  *
- * 做法是在基准曲线的**累计占比**上等距切分——这样 10 层档与旧表逐项一致，
- * 段数变少时形状也不会退化成「第一段极廉、末段极贵」的悬崖。
- * 总额按段数等比缩放（每层平均成本不变）。
+ * ⚠️ **不要按「maxLayer 是否等于 10」区分 legacy**：筑基阶层的上限本来就是 10，
+ * 用数字判别会把合法的新数据打回旧表（筑基 L9 累计会变成 163,500 而不是 15,000）。
+ * 缺 tier 的老功法回退上限同样是 10（`itemTier.DEFAULT_GONGFA_MAX_LAYER`），
+ * 与筑基**同价**——这正是统一曲线的意义：同层同价，`inheritGongfaProgress`
+ * 才能 1:1 复制层号与层内经验。给 legacy 单开一张表会让继承的连续性失效。
  *
- * @param maxLayer 功法层数上限（≥2）；≤1 视为无可升级段，返回空表。
+ * @param maxLayer 功法层数上限；≤1 视为无可升级段，返回空表；
+ *                 超出曲线跨度（>19，非法数据）才回退 {@link GONGFA_MASTERY_THRESHOLDS}。
  */
 export function buildGongfaMasteryThresholds(maxLayer: number): readonly number[] {
   const segs = Math.max(0, Math.floor(maxLayer) - 1);
   if (segs <= 0) return [];
-  const cached = thresholdCache.get(segs);
-  if (cached) return cached;
-  const baseSegs = GONGFA_MASTERY_THRESHOLDS.length;
-  const total = GONGFA_MASTERY_BUDGET_10 * segs / baseSegs;
-  const out: number[] = [];
-  let prev = 0;
-  for (let k = 1; k <= segs; k++) {
-    const cur = sampleCumulative(k * baseSegs / segs);
-    const v = (cur - prev) * total;
-    prev = cur;
-    out.push(Math.max(MASTERY_THRESHOLD_MIN, Math.round(v / 100) * 100));
-  }
-  thresholdCache.set(segs, out);
-  return out;
+  if (segs > GONGFA_MASTERY_CURVE.length) return GONGFA_MASTERY_THRESHOLDS;
+  return GONGFA_MASTERY_CURVE.slice(0, segs);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 15. 功法修炼进度倍率
 //
-//     旧版是两张写死的 10 项查表（属性 1→10×、战斗 1→2.35×），与层数上限耦合。
-//     现改为**按进度比例插值**：满层时达到该阶层的封顶倍率，
-//     属性上限按阶层分档（见 `itemTier.GONGFA_ATTRI_CAP_BY_TIER`），
-//     战斗上限恒为 {@link GONGFA_COMBAT_MULT_CAP}（战斗曲线本就平缓，不随阶层放大）。
+//     【2026-09-25 v4】旧版是两张写死的 10 项查表（属性 1→10×、战斗 1→2.35×），
+//     与层数上限耦合，**已整体作废**：
+//       · 主属性加成改由连续层号直接查 `realmScale.gongfaLayerValue`（同层同值）；
+//       · 战斗倍率改由 `realmUtils.gongfaCombatMultAt(contLayer)` 按连续层号现算。
+//     下面两张表仅因 `playInfo` 有转出而保留，无任何调用方。
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** 功法满层时的战斗效果倍率上限（与旧版第 10 层一致）。 */
+/** 功法满层时的战斗效果倍率上限（= 化神满层 L19 的 {@link gongfaCombatMultAt} 值）。 */
 export const GONGFA_COMBAT_MULT_CAP = 2.35;
 
 /**
- * @deprecated 保留仅为兼容外部引用；实际取倍率请用
- * {@link gongfaAttriMult} / {@link gongfaCombatMult}（realmUtils）。
+ * @deprecated 【2026-09-25 v4】无调用方，仅为 `playInfo` 转出而保留。
+ * 战斗倍率请改用 `realmUtils.gongfaCombatMultAt(contLayer)`。
  */
 export const GONGFA_MASTERY_ATTRI_MULT = [
   1.0, 2.0, 3.0, 4.0, 5.0,

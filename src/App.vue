@@ -5,6 +5,7 @@ import StartFrame from "./start_frame/StartFrame.vue";
 import FateChoiceScreen from "./fate_choice/FateChoiceScreen.vue";
 import MainScreen from "./main-screen/MainScreen.vue";
 import BattleScreen from "./battle_view/BattleScreen.vue";
+import BattleRosterModal from "./battle_view/BattleRosterModal.vue";
 import { gameLog } from "./log/gameLog";
 import { protagonist } from "./role_core/Protagonist";
 import { npcStore } from "./role_core/npcStore";
@@ -116,10 +117,45 @@ function onSaveLoaded(value: { id: string; payload: MjSavePayload }): void {
 
 const pendingBattleTrigger = ref<BattleTriggerEntry | null>(null);
 
+/** 开战前的参战人员选择是否开着（见 BattleRosterModal）。 */
+const rosterOpen = ref(false);
+
+/**
+ * 剧情推进触发战斗。
+ *
+ * 不直接进战斗界面，先让玩家过一遍名单——可能场上有五个人但只想带两个，
+ * 也可能想反手把某个在场之人划到对面（见 BattleRosterModal 的注释）。
+ * 测试战斗同样过这道手：假人就在名单里，正好拿 1v3、2v2 之类的编队试数值。
+ */
 function onBattleTrigger(entry: BattleTriggerEntry) {
   gameLog.info("[App] 战斗触发: " + JSON.stringify(entry, null, 2));
   pendingBattleTrigger.value = entry;
+  rosterOpen.value = true;
+}
+
+/** 名单敲定（或放弃修改）后真正进战斗界面。 */
+function enterBattle(entry: BattleTriggerEntry): void {
+  rosterOpen.value = false;
+  pendingBattleTrigger.value = entry;
   battleVisible.value = true;
+}
+
+function onRosterConfirm(entry: BattleTriggerEntry): void {
+  gameLog.info(
+    `[App] 玩家编队：我方 ${entry.allies.map(a => a.displayName).join("、") || "仅主角"}；` +
+      `敌方 ${entry.enemies.map(e => e.displayName).join("、")}`,
+  );
+  enterBattle(entry);
+}
+
+/** 「用剧情名单」/ 直接关闭：按 AI 给的名单开打（战斗已触发，不能凭空取消）。 */
+function onRosterUseDefault(): void {
+  const entry = pendingBattleTrigger.value;
+  if (!entry) {
+    rosterOpen.value = false;
+    return;
+  }
+  enterBattle(entry);
 }
 
 const battleVisible = ref(false);
@@ -131,7 +167,7 @@ function onBattleEnd(result: BattleResult | null) {
   pendingBattleTrigger.value = null;
   if (wasTest) {
     for (const n of ALL_TEST_DUMMY_NAMES) {
-      npcStore.removeNpc(n);
+      npcStore.removeNpcByName(n);
     }
   } else if (result) {
     // 无论胜负，都把结果传给 StoryChatPanel；战败时由其生成走马灯后 emit gameOver。
@@ -204,6 +240,12 @@ function onGameOver(reason: string): void {
     />
   </Transition>
 
+  <BattleRosterModal
+    :open="rosterOpen"
+    :trigger="pendingBattleTrigger"
+    @confirm="onRosterConfirm"
+    @use-default="onRosterUseDefault"
+  />
   <BattleScreen
     v-if="battleVisible"
     :trigger="pendingBattleTrigger"

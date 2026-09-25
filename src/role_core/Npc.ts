@@ -7,15 +7,17 @@ import type {
   EquippedSlotsState,
   GongfaSlotsState,
   NpcPresence,
+  PrimaryStatKey,
 } from "./types/playInfo";
 import {
   EQUIP_SLOT_COUNT,
   GONGFA_SLOT_COUNT,
   PROFILE_FIELD_MAX_LENGTH,
+  PRIMARY_STAT_KEYS,
   normalizeProfile,
 } from "./types/playInfo";
 import { DEFAULT_INVENTORY_SLOT_COUNT, compactInventorySlotsInPlace } from "./CharacterInventory";
-import { getRealmPrimaryStats, getShouyuanForRealm, applyNpcGongfaMasteryByRealm } from "./realmUtils";
+import { getRealmPrimaryStats, getShouyuanForRealm, applyNpcGongfaMasteryByRealm, hasLinggen } from "./realmUtils";
 import { gradeRangeForPowerTier } from "./types/gameConstants";
 import type { InventoryStackItem, TreasureItemDefinition, GongfaItemDefinition } from "./types/itemInfo";
 import type { NpcNearbyEntry } from "../ai/state_generate";
@@ -27,6 +29,21 @@ import type { WorldLocation } from "./types/worldLocation";
 import type { WorldTime } from "./worldTime";
 import { createDefaultWorldTime, cloneWorldTime, ensureWorldTime } from "./worldTime";
 import { gameLog } from "../log/gameLog";
+
+/**
+ * 全 0 的主属性表。
+ *
+ * `Character.emptyPrimaryStats()` 是 protected 的，模块级工厂够不着，
+ * 这里按同一份键表就地拼一份（仅用于境界查不到时的兜底）。
+ */
+function emptyPrimaryStats(): Record<PrimaryStatKey, number> {
+  const o = {} as Record<PrimaryStatKey, number>;
+  for (const k of PRIMARY_STAT_KEYS) o[k] = 0;
+  return o;
+}
+
+/** 玩家手动建卡时的默认年龄（NPC 的年龄无剧情来源，给一个像样的起点值）。 */
+export const MANUAL_NPC_DEFAULT_AGE = 20;
 
 const VALID_POWER_TIERS = new Set<string>(["小怪", "精英怪", "小boss", "大boss", "普通NPC"]);
 
@@ -301,7 +318,17 @@ export class Npc extends Character {
     if (this.isDead) return;
 
     if (entry.realm) {
-      this.setRealm(entry.realm.major || this.realm.major, entry.realm.minor || this.realm.minor);
+      const nextMajor = entry.realm.major || this.realm.major;
+      const nextMinor = entry.realm.minor || this.realm.minor;
+      // 硬锁：无灵根者一辈子出不了凡人（重评估是批量整体写回，同样不许越界）。
+      if (this.realm.major === "凡人" && nextMajor !== "凡人" && !hasLinggen(this.linggen)) {
+        console.warn(
+          `[Npc.applyReevaluation] 「${this.displayName}」无灵根，境界演进止步凡人：`
+          + `${this.realm.major}${this.realm.minor} → ${nextMajor}${nextMinor}（已丢弃）`,
+        );
+      } else {
+        this.setRealm(nextMajor, nextMinor);
+      }
     }
 
     // 文生图核心层：种族/外貌/服装（重评估整体替换）。
@@ -580,4 +607,78 @@ export class Npc extends Character {
 
     return new Npc(npcData);
   }
+}
+
+/**
+ * 玩家手动新建一张角色卡（「角色」总览 →「＋ 新建角色卡」）。
+ *
+ * 与 {@link Npc.fromAiData} 的区别：来源不是状态 AI 的 nearbyNpcs 条目，而是玩家在
+ * 角色设定表单里填的内容。因此除**境界派生的属性 / 气血上限 / 寿元**照例算出来外，
+ * 其余一律取空初值（无物品、无性格外貌记忆），画像默认落成 `source:"manual"`——
+ * 玩家自己建的人，AI 不该抢着改写；想让 AI 继续维护就在面板里打开开关。
+ *
+ * 返回的实例**尚未入库**（不在 npcStore 里），要等玩家点「创建角色卡」才写进 store；
+ * 这样「填一半关掉」不会留下一张空卡。
+ *
+ * @param opts.location 主角当前所在地点；给了就落在该地并标记为「在场」，否则标记「离开」。
+ * @param opts.worldTime 当前世界时间，用作 lastSeenWorldTime（决定总览里的出场排序）。
+ */
+export function createManualNpc(
+  opts: {
+    displayName?: string;
+    gender?: string;
+    realmMajor?: string;
+    realmMinor?: string;
+    linggen?: string[];
+    location?: WorldLocation | null;
+    worldTime?: WorldTime | null;
+  } = {},
+): Npc {
+  const realmMajor = opts.realmMajor?.trim() || "练气";
+  const realmMinor = opts.realmMinor?.trim() || "初期";
+  const displayName = opts.displayName?.trim() || "新角色";
+  const location = opts.location ?? null;
+
+  const data: NpcPlayInfo = {
+    role: "npc",
+    id: resolveNpcId(undefined, displayName, "", location),
+    displayName,
+    realm: { major: realmMajor, minor: realmMinor },
+    primaryStats: getRealmPrimaryStats(realmMajor, realmMinor) ?? emptyPrimaryStats(),
+    // 占位值：构造完立刻按境界派生值重算（见下方 computeMaxHpMp）。
+    maxHp: 100,
+    maxMp: 50,
+    currentHp: 100,
+    currentMp: 50,
+    avatarUrl: "",
+    gender: opts.gender?.trim() || "男",
+    linggen: [...(opts.linggen ?? [])],
+    age: MANUAL_NPC_DEFAULT_AGE,
+    ageConfirmed: true,
+    shouyuan: getShouyuanForRealm(realmMajor, realmMinor) ?? 100,
+    inventorySlots: Array.from({ length: DEFAULT_INVENTORY_SLOT_COUNT }, () => null),
+    gongfaSlots: [null, null, null, null, null, null, null, null] as GongfaSlotsState,
+    equippedSlots: Array.from({ length: EQUIP_SLOT_COUNT }, () => null),
+    identity: "",
+    favorability: 0,
+    isDead: false,
+    powerTier: "普通NPC",
+    race: "修仙者",
+    appearance: "",
+    clothing: "",
+    traits: [],
+    xiuwei: 0,
+    profile: normalizeProfile(undefined, "manual"),
+    currentLocation: location ? { ...location } : null,
+    // 无地点可落时标「离开」：「在场 / 休眠」都要有归属地点才会在对应场景里出现。
+    presence: location ? "active" : "departed",
+    lastSeenWorldTime: opts.worldTime ? cloneWorldTime(opts.worldTime) : createDefaultWorldTime(),
+    encounterCount: 0,
+  };
+
+  const npc = new Npc(data);
+  const { maxHp, maxMp } = npc.computeMaxHpMp();
+  npc.setMaxHpMp(maxHp, maxMp);
+  npc.setCurrentHpMp(maxHp, maxMp);
+  return npc;
 }

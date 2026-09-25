@@ -143,6 +143,8 @@ export interface BattleCombatant {
   powerTier?: string;
   identity?: string;
   sourceNpcName?: string;
+  /** 来源 NPC 的稳定 id（npcStore 主键）。结算回查优先用它，sourceNpcName 留作日志/兜底。 */
+  sourceNpcId?: string;
   /** 头像 dataURL（主角为玩家上传图，NPC 目前为空）。 */
   avatarUrl?: string;
 }

@@ -12,6 +12,7 @@ import type { StoryChatEntry } from "./story_generate";
 import { formatWorldLocationDash } from "../role_core/types/worldLocation";
 import type { WorldLocation } from "../role_core/types/worldLocation";
 import { resolveGongfaTier } from "../role_core/types/itemTier";
+import { isMortalPeakLocked } from "../role_core/realmUtils";
 
 export interface CultivationStoryInput {
   apiUrl: string;
@@ -135,7 +136,7 @@ function buildCultivationUserContent(input: CultivationStoryInput): string {
     `姓名：${p.displayName}`,
     genderLine(p.gender),
     `境界：${p.realm.major}${p.realm.minor}${p.realmComplete ? "·圆满" : ""}`,
-    `修为状态：${p.realmComplete ? "修为已圆满" : "修为未圆满"}`,
+    `修为状态：${p.realmComplete ? "修为已圆满" : (isMortalPeakLocked(p.realm.major, p.realm.minor, (p as { linggen?: string[] }).linggen) ? "修为已积满，但无灵根、无法引气入体，境界锁死在凡人后期" : "修为未圆满")}`,
     `灵根：${(p as { linggen?: string[] }).linggen?.join("") || "无"}`,
     `当前血量：${p.currentHp}/${p.maxHp}`,
     `当前法力：${p.currentMp}/${p.maxMp}`,

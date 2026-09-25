@@ -45,6 +45,16 @@ import {
   setAutoTurnSaveCount,
   MAX_AUTO_TURN_SAVES,
 } from "../save/autoTurnSave";
+import {
+  aiTimeoutSec,
+  setAiTimeoutSec,
+  resetAiTimeoutSec,
+  AI_TIMEOUT_SEC_MIN,
+  AI_TIMEOUT_SEC_MAX,
+  AI_TIMEOUT_SEC_STEP,
+  AI_TIMEOUT_SEC_DEFAULT,
+  AI_TIMEOUT_HINT,
+} from "../role_core/aiTimeoutStore";
 
 const props = defineProps<{
   open: boolean;
@@ -138,6 +148,33 @@ function onChapterLimitInput(ev: Event): void {
 
 function resetChapterLimit(): void {
   setChapterTurnLimit(DEFAULT_CHAPTER_TURN_LIMIT);
+}
+
+/* ---------- AI 请求超时 ---------- */
+
+/** 单次 AI 请求的最长等待秒数。 */
+const timeoutSec = computed(() => aiTimeoutSec.value);
+
+/** 展示文案：满一分钟写「7 分 0 秒」这类，短于 60s 直接写秒。 */
+const timeoutText = computed(() => {
+  const s = timeoutSec.value;
+  if (s < 60) return `${s} 秒`;
+  const m = Math.floor(s / 60);
+  const rest = s % 60;
+  return rest === 0 ? `${m} 分钟` : `${m} 分 ${rest} 秒`;
+});
+
+function onTimeoutSlide(ev: Event): void {
+  const v = Number((ev.target as HTMLInputElement).value);
+  if (Number.isFinite(v)) setAiTimeoutSec(v);
+}
+
+function stepTimeout(delta: number): void {
+  setAiTimeoutSec(timeoutSec.value + delta * AI_TIMEOUT_SEC_STEP);
+}
+
+function isTimeoutDefault(): boolean {
+  return timeoutSec.value === AI_TIMEOUT_SEC_DEFAULT;
 }
 
 /* ---------- 回合自动存档 ---------- */
@@ -403,6 +440,49 @@ onUnmounted(() => {
             快照与主存档都在同一份列表里：快照名形如「某某 · 第N回合」，读取即回到那一回合的开头。
             切换前会自动把当前进度落盘，不会丢档。
           </p>
+        </section>
+
+        <section class="mj-settings__group">
+          <div class="mj-settings__row">
+            <span class="mj-settings__label">AI 请求超时</span>
+            <span class="mj-settings__value">{{ timeoutText }}</span>
+          </div>
+
+          <div class="mj-settings__slider">
+            <button
+              type="button"
+              class="mj-settings__step"
+              title="减少 30 秒"
+              :disabled="timeoutSec <= AI_TIMEOUT_SEC_MIN"
+              @click="stepTimeout(-1)"
+            >−</button>
+            <input
+              class="mj-settings__range"
+              type="range"
+              :min="AI_TIMEOUT_SEC_MIN"
+              :max="AI_TIMEOUT_SEC_MAX"
+              :step="AI_TIMEOUT_SEC_STEP"
+              :value="timeoutSec"
+              aria-label="AI 请求超时秒数"
+              @input="onTimeoutSlide"
+            />
+            <button
+              type="button"
+              class="mj-settings__step"
+              title="增加 30 秒"
+              :disabled="timeoutSec >= AI_TIMEOUT_SEC_MAX"
+              @click="stepTimeout(1)"
+            >＋</button>
+          </div>
+
+          <button
+            type="button"
+            class="mj-settings__preset mj-settings__preset--reset"
+            :disabled="isTimeoutDefault()"
+            @click="resetAiTimeoutSec()"
+          >恢复默认</button>
+
+          <p class="mj-settings__hint">{{ AI_TIMEOUT_HINT }}</p>
         </section>
       </div>
     </div>

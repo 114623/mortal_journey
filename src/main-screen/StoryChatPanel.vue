@@ -3,13 +3,20 @@ import { ref, watch, computed, nextTick, onUnmounted } from "vue";
 import type { OpeningStoryPhase } from "../ai/useOpeningStory";
 import { useApiConfig } from "../ai/useApiConfig";
 import { generateStory, type StoryChatEntry } from "../ai/story_generate";
-import { generateState, type StateParsed, type BattleTriggerEntry } from "../ai/state_generate";
+import {
+  generateState,
+  findMissingCriticalTags,
+  type StateParsed,
+  type BattleTriggerEntry,
+} from "../ai/state_generate";
+import { filterRepeatedOptions, OPTION_DEDUP_MIN_KEEP } from "../role_core/optionDedup";
 import { generateCultivationStory } from "../ai/cultivation_story_generate";
 import { generateBattleStory } from "../ai/battle_story_generate";
 import { generateBattleChoices } from "../ai/battle_choice_generate";
 import { generateFinaleStory } from "../ai/finale_story_generate";
 import { generateGrandSummary } from "../ai/grand_summary_generate";
 import { generateNpcReevaluation } from "../ai/npc_reevaluation_generate";
+import { AiOutputTruncatedError } from "../ai/openAiChatBridge";
 import type { CultivationInput } from "../ai/cultivation_types";
 import { protagonist, Protagonist } from "../role_core/Protagonist";
 import { npcStore } from "../role_core/npcStore";
@@ -29,6 +36,7 @@ import {
   worldTimeYearsBetween,
   calendarYearsElapsed,
   NPC_REEVALUATION_THRESHOLD_YEARS,
+  worldTimeToDays,
   type WorldTime,
 } from "../role_core/worldTime";
 import type { BattleResult } from "../battle_engine/types";
@@ -52,6 +60,10 @@ const props = withDefaults(
   defineProps<{
     phase?: OpeningStoryPhase;
     errorMessage?: string;
+    /** 开局状态（功法 / 物品 / NPC / 地点）生成失败：需显示 warning + 重试按钮。 */
+    initStateFailed?: boolean;
+    /** 「重新生成初始状态」是否正在跑。 */
+    retryingInitState?: boolean;
     currentWorldLocation?: WorldLocation | null;
     worldTime?: WorldTime;
     battleResult?: BattleResult | null;
@@ -60,6 +72,8 @@ const props = withDefaults(
   {
     phase: "idle",
     errorMessage: "",
+    initStateFailed: false,
+    retryingInitState: false,
     currentWorldLocation: null,
     worldTime: undefined,
     battleResult: undefined,
@@ -77,6 +91,8 @@ const emit = defineEmits<{
   "consumeCultivation": [];
   "generatingChange": [value: boolean];
   "gameOver": [reason: string];
+  /** 玩家点了「重新生成初始状态」。 */
+  "retryInitState": [];
 }>();
 
 const chatMessages = storyStore.chatMessages;
@@ -93,6 +109,14 @@ const inputText = ref("");
 const generating = ref(false);
 const generatingPhase = ref<"story" | "state" | "summary">("story");
 const genError = ref("");
+/**
+ * 状态 AI 失败提示。
+ *
+ * 【2026-09-25】此前状态更新失败**不显示在界面上**——只在控制台写一行日志，
+ * 玩家看到的只是「剧情出来了但没有推进选项」，既不知道失败也没有补救入口
+ * （实测一份存档里玩家原样重发了 3 遍相同内容）。现在独立成一条提示。
+ */
+const stateError = ref("");
 /** 当前显示的推进选项（来自状态 AI，协议格式数组）。null 时隐藏按钮区。 */
 const actionOptions = storyStore.actionOptions;
 
@@ -100,6 +124,7 @@ function beginGenerating(): void {
   generating.value = true;
   generatingPhase.value = "story";
   genError.value = "";
+  stateError.value = "";
 }
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const pendingBattleTrigger = ref<BattleTriggerEntry | null>(null);
@@ -174,6 +199,9 @@ function buildChatHistory(): StoryChatEntry[] {
   // 注：物理裁剪后 upTo 通常归零，summary 消息作为首条纳入，替代旧版的合成前缀。
   for (let idx = Math.max(0, upTo); idx < msgs.length; idx++) {
     const m = msgs[idx];
+    // notice 是给玩家看的本地提示（如"本回合状态回报不完整"），绝不喂给 AI：
+    // 否则模型会把它当成玩家的发言或剧情的一部分。
+    if (m.type === "notice") continue;
     if (m.type === "summary") {
       entries.push({ role: "assistant", content: `【剧情总纲·截至早期】\n${m.content.trim()}` });
       continue;
@@ -468,6 +496,14 @@ async function applyStateResult(stateResult: StateParsed, linggen: string[]): Pr
         newWorldTime = advanceWorldTime(props.worldTime, delta);
         emit("update:worldTime", newWorldTime);
 
+        // 世界时间推进后清理到期的持久状态（如「气血亏虚」三十天满即自动痊愈）。
+        // 这是 buff 的常规到期通道；战斗结算另有一条（battleSettle）。
+        if (current.pruneBuffs(newWorldTime) > 0) {
+          // buff 影响血上限，剔除后要重算，否则上限一直停在打折值。
+          current.refreshDerivedStats();
+          gameLog.info("[StoryChat] 有状态到期，已自动清除。");
+        }
+
         // 寿元耗尽检查：当前年龄 = 开局档案年龄 + 自基线起经过的整年数。
         if (getActiveDifficulty() !== "简单" && newWorldTime) {
           const currentAge = current.age + calendarYearsElapsed(storyStore.worldTimeBaseline.value, newWorldTime);
@@ -577,9 +613,24 @@ async function applyStateResult(stateResult: StateParsed, linggen: string[]): Pr
     gameLog.error("[StoryChat] 战斗触发处理失败：" + (e instanceof Error ? e.message : String(e)));
   }
 
-  actionOptions.value = stateResult.actionOptions;
-  // 记录本轮推进轴，供下轮做跨回合轮换（保留最近 3 轮）。
-  storyStore.noteBranchAxes(stateResult.actionOptions);
+  // 防复读硬兜底：提示词只是"请"模型别重复，这里再拦一道——
+  // 与最近 3 轮给过的选项撞了 ≥8 字公共子串的候选直接丢掉（保底留 2 条）。
+  const recentTexts = storyStore.recentOptionTexts();
+  const dedup = filterRepeatedOptions(stateResult.actionOptions ?? [], recentTexts);
+  if (dedup.dropped.length > 0) {
+    gameLog.info(`[推进] 过滤掉 ${dedup.dropped.length} 条与上轮重复的选项：` + dedup.dropped.join(" / "));
+  }
+  if (dedup.kept.length < (stateResult.actionOptions?.length ?? 0) && dedup.kept.length <= OPTION_DEDUP_MIN_KEEP) {
+    gameLog.warn("[推进] 去重后选项不足，已按重合程度回补。");
+  }
+  const finalOptions = dedup.kept.length > 0 ? dedup.kept : stateResult.actionOptions;
+
+  actionOptions.value = finalOptions;
+  // 记录本轮推进轴与选项正文，供下轮做跨回合轮换 / 防复读（各保留最近 3 轮）。
+  storyStore.noteBranchAxes(finalOptions);
+  storyStore.noteActionOptions(finalOptions);
+  // 主线进度回报：AI 自报本回合是否与主线有关，供剧情 AI 回注（§G 闭环）。
+  storyStore.noteMainlineReport(stateResult.mainlineReport);
   return { gameOverReason };
 }
 
@@ -591,21 +642,60 @@ function enterBattle(): void {
 }
 
 /**
+ * 场景被强制清零时，程序代写一段转场。
+ *
+ * 为什么需要：收束锁撑满宽限回合后 `noteSceneTurn` 会直接把场景进度清零防死锁，
+ * 但玩家侧看到的是「打得好好的，场景限制突然没了」——没有任何交代，
+ * 下一回合 AI 也不知道该往哪儿接。这里补一句旁白 + 推进一天，让断点是连续的。
+ *
+ * **不主动改地点**：世界地点留给下一回合状态 AI 自然输出。程序越权改地点
+ * 会和 AI 的 `mj_world_body` 打架（两边各写一个，玩家看到瞬移）。
+ *
+ * @param sceneName 清零前的场景名（秘境 / 擂台名，可能为空）。
+ * @param locationName 清零前的地点锚点串（可能为空）。
+ */
+async function writeSceneForceClearTransition(sceneName: string, locationName: string): Promise<void> {
+  const where = sceneName || locationName || "此地";
+  const text = `【转场】在${where}的机缘已尽。你收拾行装，离开了${where}。`;
+  chatMessages.value.push({ type: "story", content: text });
+  gameLog.info(`[场景配额] 收束锁超时强制清零，已代写转场（${where}）。`);
+
+  try {
+    if (props.worldTime) {
+      const next = advanceWorldTime(props.worldTime, { days: 1 });
+      emit("update:worldTime", next);
+      // 推进一天后照常清理到期状态（与常规时间推进同一条通道）。
+      const p = protagonist.value;
+      if (p && p.pruneBuffs(next) > 0) {
+        p.refreshDerivedStats();
+        gameLog.info("[StoryChat] 转场推进时间后，有持久状态到期已清除。");
+      }
+    }
+  } catch (e) {
+    gameLog.error("[StoryChat] 转场推进世界时间失败：" + (e instanceof Error ? e.message : String(e)));
+  }
+}
+
+/**
  * 校验战斗触发条目：除主角外，所有参战者必须在 npcStore 中存在且未死亡。
- * 返回缺失（未找到或已死亡）的 displayName 列表；空数组表示全部就绪。
+ * 优先按 npcId 校验（精确），未带 id（旧存档/AI 未输出）时按 displayName 兜底。
+ * 返回缺失（未找到或已死亡）的参战者标识列表；空数组表示全部就绪。
  */
 function findMissingBattleCombatants(trigger: BattleTriggerEntry): string[] {
   const missing: string[] = [];
   const protagonistName = protagonist.value?.displayName;
+  const isReady = (c: { npcId?: string; displayName: string }): boolean => {
+    const npc = c.npcId ? npcStore.getNpcById(c.npcId) : undefined;
+    const found = npc ?? npcStore.getNpc(c.displayName);
+    return !!found && !found.isDead;
+  };
   for (const ally of trigger.allies) {
     if (ally.roleHint === "主角") continue;
     if (protagonistName && ally.displayName === protagonistName) continue;
-    const npc = npcStore.getNpc(ally.displayName);
-    if (!npc || npc.isDead) missing.push(ally.displayName);
+    if (!isReady(ally)) missing.push(ally.displayName);
   }
   for (const enemy of trigger.enemies) {
-    const npc = npcStore.getNpc(enemy.displayName);
-    if (!npc || npc.isDead) missing.push(enemy.displayName);
+    if (!isReady(enemy)) missing.push(enemy.displayName);
   }
   return missing;
 }
@@ -679,10 +769,6 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
   // 必须在 push 用户消息之前——否则存的就是「本回合开始后」的状态，回滚点会错位。
   captureAutoTurnSave();
 
-  // 上轮选项正文：状态 AI 用它做"防复读"（玩家没选的就是拒绝了）。
-  // 必须在 actionOptions 清空之前取出。
-  const prevOptionTexts = actionOptions.value?.map(o => o.text) ?? [];
-
   actionOptions.value = null;
   chatMessages.value.push({ type: "user", content: ctx.userContent });
   beginGenerating();
@@ -745,6 +831,7 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
         chatHistory,
         sceneNpcSnapshot: buildSceneNpcSnapshot() || undefined,
         currentWorldLocation: props.currentWorldLocation ? formatWorldLocationDash(props.currentWorldLocation) : undefined,
+        currentWorldTime: props.worldTime,
         sceneDirective,
         signal: ac.signal,
       });
@@ -772,13 +859,32 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
         currentWorldTime: props.worldTime,
         npcSnapshot: npcSnapshot || undefined,
         recentBranchAxes: storyStore.recentBranchAxes(),
-        recentOptionTexts: prevOptionTexts,
+        // 最近 3 轮（最多 12 条）给过的选项正文：玩家没选的等于拒绝了，别再端上来。
+        recentOptionTexts: storyStore.recentOptionTexts(),
         sceneDirective,
         signal: ac.signal,
       };
-      const stateResult: StateParsed = await generateState(stateInput);
+      const stateResult: StateParsed = await callStateAI(stateInput, ac);
 
       if (abortCtl !== ac) return;
+
+      // 缺失标签可见化：状态 AI 少写了关键段（多半是输出被截断）时程序不会报错，
+      // 玩家只会隐约觉得"这回合好像什么都没记"。写 gameLog 供排查，
+      // 并在剧情栏给一条灰色提示——至少让玩家知道刚才那回合没记全。
+      {
+        const missing = findMissingCriticalTags(stateResult);
+        if (missing.length > 0) {
+          gameLog.warn("[状态AI] 本回合缺失标签：" + missing.join("、"));
+          // 时间推进本就可能合法为空（原地对话/不动的回合），只记日志不打扰玩家。
+          const worthTelling = missing.filter(m => m !== "时间推进");
+          if (worthTelling.length > 0) {
+            chatMessages.value.push({
+              type: "notice",
+              content: `本回合状态回报不完整（缺：${worthTelling.join("、")}），已自动兜底，不影响继续。`,
+            });
+          }
+        }
+      }
 
       // 兜底：既没有推进选项也没有战斗触发 = 玩家这一回合无路可走。
       // 常见成因是模型漏写/提前收笔，末尾两段标签没出来——带一句点名要求重试一次，
@@ -787,8 +893,8 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
         gameLog.warn("[推进] 本回合既无推进选项也无战斗触发，点名重试一次。");
         const retryHint =
           `${sceneDirective ? sceneDirective + "\n" : ""}` +
-          "【补充·最重要】你上一条输出漏了收尾标签：本条必须完整输出第 11 段（满足战斗触发条件时）" +
-          "与第 13 段（4 条并列推进选项），不得留空、不得因为前面内容长而提前收笔。";
+          "【补充·最重要】你上一条输出漏了收尾标签：本条必须完整输出第 16 段（满足战斗触发条件时）" +
+          "与第 17 段（4 条并列推进选项），不得留空、不得因为前面内容长而提前收笔。";
         try {
           const retry = await generateState({ ...stateInput, sceneDirective: retryHint });
           if (abortCtl !== ac) return;
@@ -820,7 +926,14 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
       const { gameOverReason } = await applyStateResult(stateResult, p.linggen);
 
       // 本场景又过了一回合：这是层/轮推进与收束判定的真正来源（不依赖 AI 报数）。
-      noteSceneTurn();
+      // 非战斗回合按 0.5 计——配额要拦的是「刷无成本的回合赖在秘境里」，
+      // 战斗回合自带战损与消耗，同价计费等于凭空砍掉一半可玩回合。
+      const sceneTurn = noteSceneTurn(stateResult.battleTrigger ? 1 : 0.5);
+      if (sceneTurn.forceCleared) {
+        // 收束锁撑满宽限回合 → 程序强制清零。此时玩家视角若没有任何交代，
+        // 就是「打得好好的，场景限制突然没了」。补一段转场旁白 + 推进一天。
+        await writeSceneForceClearTransition(sceneTurn.sceneName, sceneTurn.locationName);
+      }
       // 篇章回合数 +1（同样不依赖 AI 报数；无篇章时内部直接返回）。
       chapterStore.noteChapterTurn();
 
@@ -841,7 +954,16 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
         writeActiveSave();
       }
     } catch (stateErr) {
-      gameLog.error("[StoryChat] 状态更新失败：" + (stateErr instanceof Error ? stateErr.message : String(stateErr)));
+      if (ac.signal.aborted) return;
+      const raw = stateErr instanceof Error ? stateErr.message : String(stateErr);
+      gameLog.error("[StoryChat] 状态更新失败：" + raw);
+      // 失败要说人话：告诉玩家「什么没落地」以及「能怎么办」，
+      // 而不是让他对着"没出现选项"自己猜（这正是此前反复重发同一句话的原因）。
+      stateError.value =
+        stateErr instanceof AiOutputTruncatedError
+          ? "本回合状态未更新：模型输出被长度上限截断（血量 / 物品 / 时间 / 推进选项都没落地）。" +
+            "可在「API设置」换用输出上限更高的模型或渠道，然后重试本回合。"
+          : `本回合状态未更新，剧情已生成但血量 / 物品 / 时间 / 推进选项可能没落地。原因：${raw}`;
     }
   } catch (e) {
     if (ac.signal.aborted) return;
@@ -854,6 +976,51 @@ async function runStoryGenerationRound(ctx: RoundContext): Promise<void> {
     generating.value = false;
     hasRetryable.value = lastPreGenSnapshot !== null;
   }
+}
+
+/**
+ * 状态 AI 调用（**带一次自动重试**）。
+ *
+ * 【2026-09-25】原先这里是裸调 `generateState`，异常直接落到外层的静默 catch：
+ * 不重试、不提示，玩家只能靠「没出现选项」自己猜，于是原样重发（存档实证：连续 3 条
+ * 相同输入）。现在对**可重试的失败**（输出被截断、网络抖动、上游 5xx）自动重试一次，
+ * 仍失败才把原因抛给上层显示。
+ *
+ * 截断时重试必须带「精简输出」的要求——同样的输入、同样的输出量，
+ * 不提示的话第二次几乎必然再截断。
+ */
+async function callStateAI(
+  base: Parameters<typeof generateState>[0],
+  ac: AbortController,
+): Promise<StateParsed> {
+  let input = base;
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const r = await generateState(input);
+      stateError.value = "";
+      return r;
+    } catch (e) {
+      lastErr = e;
+      if (ac.signal.aborted) throw e;
+      const truncated = e instanceof AiOutputTruncatedError;
+      const msg = e instanceof Error ? e.message : String(e);
+      gameLog.warn(
+        `[状态AI] 第 ${attempt}/2 次调用失败${truncated ? "（输出被截断）" : ""}：${msg}`,
+      );
+      if (attempt === 1 && truncated) {
+        input = {
+          ...base,
+          sceneDirective:
+            (base.sceneDirective ?? "") +
+            "\n【补充·最重要】上一条回复因输出长度上限被截断，末尾标签已丢失。本条请**大幅精简**：" +
+            "各段只留必要信息、压缩叙事性描写，务必完整输出第 16 段（满足条件时）、" +
+            "第 17 段（4 条推进选项）与第 15 段（剧情快照）。",
+        };
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 /**
@@ -983,15 +1150,48 @@ function formatNpcBriefLine(npc: Npc): string {
   return `${npc.displayName}（npcId:${npc.id}，${npc.identity}，${Character.formatRealm(npc.realm)}，当前:${cur}，好感${npc.favorability}，上次见面:${lastSeen}）`;
 }
 
+/**
+ * NPC 快照的体量配额。
+ *
+ * 为什么要限：快照是**每回合**都要塞进状态 AI 的一大段文本，而休眠者与羁绊者
+ * 会随游戏时长无上限地攒——回一趟老巢可能几十行，广结善缘玩法下羁绊段同样膨胀。
+ * 体量一大，输出更容易撞到上限被截断，末尾的推进选项先死（见 §B/§A 的截断事故）。
+ * 这几个数字是可调的旋钮，觉得 AI 记不住人可以往上调，觉得输出太长就往下调。
+ */
+/** 本地点休眠 NPC 最多列几名全行（其余折叠成一行计数）。 */
+const NPC_SNAPSHOT_DORMANT_CAP = 8;
+/** 折叠行里最多再罗列几个名字。 */
+const NPC_SNAPSHOT_DORMANT_NAMES = 12;
+/** 重要羁绊 NPC 最多列几名（按好感绝对值降序）。 */
+const NPC_SNAPSHOT_BONDED_CAP = 6;
+/** 快照超过多少字就在日志里警告（提示该清理旧 NPC / 调小配额）。 */
+const NPC_SNAPSHOT_WARN_CHARS = 4000;
+
 function buildNpcSnapshot(): string {
   const loc = props.currentWorldLocation ?? null;
   const activeNpcs = loc ? npcStore.getActiveNpcsAt(loc) : [];
-  const dormantNpcs = loc ? npcStore.getDormantNpcsAt(loc) : [];
+  const dormantAll = loc ? npcStore.getDormantNpcsAt(loc) : [];
   const activeSet = new Set<Npc>(activeNpcs);
-  const dormantSet = new Set<Npc>(dormantNpcs);
-  const bondedNpcs = npcStore.getBondedNpcs().filter(n =>
+  const dormantSet = new Set<Npc>(dormantAll);
+  const bondedAll = npcStore.getBondedNpcs().filter(n =>
     !activeSet.has(n) && !dormantSet.has(n) && n.presence !== "dead",
   );
+
+  // 休眠段：按「上次见面时间」从近到远排序，只留最近见过的 CAP 名，
+  // 其余折叠成一行（避免老巢回一趟几十行把快照撑爆）。
+  const dormantSorted = dormantAll.slice().sort((a, b) => {
+    const ta = a.lastSeenWorldTime ? worldTimeToDays(a.lastSeenWorldTime) : -1;
+    const tb = b.lastSeenWorldTime ? worldTimeToDays(b.lastSeenWorldTime) : -1;
+    return tb - ta;
+  });
+  const dormantNpcs = dormantSorted.slice(0, NPC_SNAPSHOT_DORMANT_CAP);
+  const dormantOverflow = dormantSorted.slice(NPC_SNAPSHOT_DORMANT_CAP);
+  // 羁绊段：按好感绝对值降序，只留最要紧的 CAP 名。
+  const bondedNpcs = bondedAll
+    .slice()
+    .sort((a, b) => Math.abs(b.favorability) - Math.abs(a.favorability))
+    .slice(0, NPC_SNAPSHOT_BONDED_CAP);
+  const bondedOverflow = bondedNpcs.length < bondedAll.length ? bondedAll.length - bondedNpcs.length : 0;
 
   const sections: string[] = [];
 
@@ -999,13 +1199,27 @@ function buildNpcSnapshot(): string {
     sections.push("【当前场景在场NPC】\n" + activeNpcs.map(formatNpcFullLine).join("\n"));
   }
   if (dormantNpcs.length > 0) {
-    sections.push("【本地点休眠NPC（曾在此地见过，当前不在场）】\n" + dormantNpcs.map(formatNpcBriefLine).join("\n"));
+    const lines = dormantNpcs.map(formatNpcBriefLine);
+    if (dormantOverflow.length > 0) {
+      const names = dormantOverflow.slice(0, NPC_SNAPSHOT_DORMANT_NAMES).map(n => n.displayName);
+      const more = dormantOverflow.length > NPC_SNAPSHOT_DORMANT_NAMES ? "等" : "";
+      lines.push(
+        `（另有 ${dormantOverflow.length} 名休眠者从略：${names.join("、")}${more}）`,
+      );
+    }
+    sections.push("【本地点休眠NPC（曾在此地见过，当前不在场）】\n" + lines.join("\n"));
   }
   if (bondedNpcs.length > 0) {
-    sections.push("【重要羁绊NPC（高好感或boss级，可能身在别处）】\n" + bondedNpcs.map(formatNpcBriefLine).join("\n"));
+    const lines = bondedNpcs.map(formatNpcBriefLine);
+    if (bondedOverflow > 0) lines.push(`（另有 ${bondedOverflow} 名羁绊 NPC 从略）`);
+    sections.push("【重要羁绊NPC（高好感或boss级，可能身在别处）】\n" + lines.join("\n"));
   }
 
-  return sections.join("\n\n");
+  const text = sections.join("\n\n");
+  if (text.length > NPC_SNAPSHOT_WARN_CHARS) {
+    gameLog.warn(`[NPC快照] 本回合快照 ${text.length} 字，偏大，可考虑清理旧 NPC 或调小配额。`);
+  }
+  return text;
 }
 
 /**
@@ -1184,6 +1398,16 @@ watch(
         >
           完成命运抉择并进入主界面后，开局剧情将显示于此。
         </p>
+        <!-- 开局状态失败：正文出来了但功法 / 物品 / NPC / 地点没落地，必须让玩家看见 -->
+        <div v-if="initStateFailed && phase === 'ready'" class="main-panel__init-state-warning">
+          <span>初始状态生成失败（功法 / 物品 / NPC 可能缺失）。</span>
+          <button
+            type="button"
+            class="main-panel__init-state-btn"
+            :disabled="retryingInitState"
+            @click="emit('retryInitState')"
+          >{{ retryingInitState ? "生成中…" : "重新生成初始状态" }}</button>
+        </div>
         <template v-else>
           <div
             v-for="(msg, idx) in chatMessages"
@@ -1199,6 +1423,11 @@ watch(
             <template v-else-if="msg.type === 'story'">
               <div class="main-panel__chat-bubble main-panel__chat-bubble--story">
                 <div class="main-panel__story-prose">{{ msg.content }}</div>
+              </div>
+            </template>
+            <template v-else-if="msg.type === 'notice'">
+              <div class="main-panel__chat-bubble main-panel__chat-bubble--notice">
+                {{ msg.content }}
               </div>
             </template>
             <template v-else>
@@ -1225,6 +1454,9 @@ watch(
         </div>
         <div v-else-if="genError" class="main-panel__composer-status main-panel__composer-status--error">
           <i class="fa-solid fa-circle-exclamation" aria-hidden="true"></i>{{ genError }}
+        </div>
+        <div v-else-if="stateError" class="main-panel__composer-status main-panel__composer-status--error">
+          <i class="fa-solid fa-circle-exclamation" aria-hidden="true"></i>{{ stateError }}
         </div>
         <div v-if="battlePending" class="main-panel__battle-entry main-panel__battle-entry--inline">
           <button type="button" class="main-panel__battle-entry-btn" @click="enterBattle">

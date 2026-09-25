@@ -35,6 +35,7 @@ import {
   closeChapter,
   clearChapter,
 } from "../role_core/chapterStore";
+import { storyStore } from "../role_core/storyStore";
 
 const props = defineProps<{
   open: boolean;
@@ -105,6 +106,9 @@ const activeText = computed({
 });
 
 const activeHint = computed(() => TABS.find((t) => t.key === activeTab.value)?.hint ?? "");
+
+/** 主线进度记录（状态 AI 每回合自报，只读展示，最多 10 条）。 */
+const mainlineTrail = computed(() => storyStore.recentMainlineTrail());
 
 const savedHint = ref("");
 
@@ -409,6 +413,30 @@ onUnmounted(() => {
               </p>
             </section>
 
+            <!-- 主线进度记录：只读，状态 AI 每回合自报，玩家据此验证主线闭环在转 -->
+            <section v-if="activeTab === 'storyOutline'" class="mj-worldset-mainline">
+              <div class="mj-worldset-chapter-head">
+                <span class="mj-worldset-chapter-title">主线进度记录</span>
+                <span class="mj-worldset-chapter-state">{{ mainlineTrail.length > 0 ? `最近 ${mainlineTrail.length} 回合` : "暂无" }}</span>
+              </div>
+              <ul v-if="mainlineTrail.length > 0" class="mj-worldset-mainline-list">
+                <li v-for="(t, i) in mainlineTrail" :key="i" class="mj-worldset-mainline-item">
+                  <span class="mj-worldset-mainline-mark" :class="t.advanced ? 'is-advanced' : 'is-idle'">
+                    {{ t.advanced ? "✅" : "❌" }}
+                  </span>
+                  <span class="mj-worldset-mainline-round">第{{ t.round }}回合</span>
+                  <span v-if="t.advanced && t.note" class="mj-worldset-mainline-note">{{ t.note }}</span>
+                  <span v-else class="mj-worldset-mainline-note is-dim">本回合未触及主线</span>
+                </li>
+              </ul>
+              <p v-else class="mj-worldset-chapter-hint">
+                还没有记录。写下主线后每回合由状态 AI 自报：✅ = 与主线有关，❌ = 本回合在忙别的。
+              </p>
+              <p class="mj-worldset-chapter-note">
+                连续多回合 ❌ 时，剧情 AI 会让环境 / NPC 把线索往你身边送（不打断你正在做的事）。
+              </p>
+            </section>
+
             <div class="mj-worldset-meta">
               {{ activeText.length }} 字
               <span v-if="dirty" class="mj-worldset-dirty">· 有未保存的修改</span>
@@ -633,6 +661,50 @@ onUnmounted(() => {
 
 .mj-worldset-chapter-note b {
   color: #c3ab88;
+}
+
+/* 主线进度记录（只读列表，随存档保存，最多展示 10 条） */
+.mj-worldset-mainline {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--mj-border-subtle, rgba(140, 150, 140, 0.18));
+}
+
+.mj-worldset-mainline-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.mj-worldset-mainline-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--mj-fg, #dfe4dc);
+}
+
+.mj-worldset-mainline-mark {
+  flex: none;
+}
+
+.mj-worldset-mainline-round {
+  flex: none;
+  color: var(--mj-muted, #8a9088);
+}
+
+.mj-worldset-mainline-note {
+  word-break: break-word;
+}
+
+.mj-worldset-mainline-note.is-dim {
+  color: var(--mj-muted, #8a9088);
 }
 
 .mj-worldset-input:focus {

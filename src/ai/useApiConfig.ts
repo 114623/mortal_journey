@@ -115,6 +115,9 @@ export function useApiConfig(): UseApiConfigReturn {
         messages: [{ role: "user", content: "ping" }],
         temperature: 0,
         max_tokens: 8,
+        // 「测试连接」是 ping，不该用玩家给剧情调的长超时（否则渠道挂死时干等 7 分钟
+        // 才知道失败）。这里固定 30s：正常网关 ping 远快于此，慢于此基本可直接判不可用。
+        requestTimeoutMs: 30000,
       });
       const ms = Date.now() - started;
       return "测试成功（" + (ms / 1000).toFixed(2) + "s）：" + (content || "已收到响应");

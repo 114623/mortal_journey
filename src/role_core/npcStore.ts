@@ -8,7 +8,16 @@ import type { WorldLocation } from "./types/worldLocation";
 import { isWorldLocationEqual } from "./types/worldLocation";
 import type { WorldTime } from "./worldTime";
 import { cloneWorldTime, createDefaultWorldTime, worldTimeToDays } from "./worldTime";
+import { resolveNpcId } from "./npcId";
+import { gameLog } from "../log/gameLog";
 
+/**
+ * NPC 主键：稳定 npcId（Npc.id）。
+ *
+ * 同名 NPC 天然共存（不再靠「（2）（3）」后缀另建卡）；改名只改 displayName，
+ * 不动键。按名查询 {@link getNpc} 仅供 UI 重名校验等场景，主查询一律走
+ * {@link getNpcById}。
+ */
 const npcMap: Ref<Map<string, Npc>> = ref(new Map());
 
 /** applyNpcUpdates 的可选项。 */
@@ -21,23 +30,46 @@ export interface ApplyNpcUpdatesOptions {
   currentWorldTime?: WorldTime | null;
 }
 
+/**
+ * 合成 id 撞车防护：AI 群体同名输出（未给 id）会在同地点算出同一个合成 id；
+ * AI 直给的 id 也可能重复。命中已占用 id 时按「身份#序号」重新合成，保证一人一格。
+ *
+ * 前提：调用方在入库**之后**调用（撞车判定即查 Map）。
+ */
+function ensureUniqueId(npc: Npc, currentLocation: WorldLocation | null): void {
+  if (!npcMap.value.has(npc.id)) return;
+  const identity = (npc.identity ?? "").trim();
+  let seq = 2;
+  let candidate = resolveNpcId(undefined, npc.displayName, `${identity}#${seq}`, currentLocation);
+  while (npcMap.value.has(candidate)) {
+    seq += 1;
+    candidate = resolveNpcId(undefined, npc.displayName, `${identity}#${seq}`, currentLocation);
+  }
+  gameLog.warn(
+    `[NpcStore] NPC id 撞车（${npc.id}），已为「${npc.displayName}」重新生成唯一 id（${candidate}）。`,
+  );
+  npc.id = candidate;
+}
+
 /** 触发「重要羁绊」简表的门槛（绝对值）。 */
 export const NPC_BOND_FAVOR_THRESHOLD = 40;
 /** 触发「重要羁绊」简表的 powerTier 集合。 */
 const NPC_BOND_POWER_TIERS: ReadonlySet<PowerTier> = new Set(["小boss", "大boss"]);
 
 export function useNpcStore() {
-  /** 按稳定 npcId（Npc.id）查找。 */
+  /** 按稳定 npcId 查找（主键直查，O(1)）。 */
   function findByNpcId(npcId: string): Npc | undefined {
     if (!npcId) return undefined;
-    for (const npc of npcMap.value.values()) {
-      if (npc.id === npcId) return npc;
-    }
-    return undefined;
+    return npcMap.value.get(npcId);
   }
 
+  /** 按显示名线性查找。仅供 UI 重名校验等场景；主查询走 {@link getNpcById}。 */
   function getNpc(displayName: string): Npc | undefined {
-    return npcMap.value.get(displayName);
+    if (!displayName) return undefined;
+    for (const npc of npcMap.value.values()) {
+      if (npc.displayName === displayName) return npc;
+    }
+    return undefined;
   }
 
   function getNpcById(npcId: string): Npc | undefined {
@@ -123,13 +155,16 @@ export function useNpcStore() {
   /**
    * 把 AI 返回的 nearbyNpcs 合并进 store，并应用核心变更事件。
    *
-   * 匹配顺序：① entry.npcId 命中已有 NPC 的稳定 id；② 回退到按 displayName 匹配。
-   * 已存在 NPC 调 {@link Npc.mergeFromAi}（白名单策略，核心层默认冻结）。
-    * 新 NPC 调 {@link Npc.fromAiData} 构造，currentLocation 取 entry.currentLocation 或回退到 options.currentLocation。
-    * 全部 nearbyNpcs 处理完后，统一标记为 active 并刷新 lastSeen。
-    * 最后应用 coreChangeEvents。
-    * @return 本次新建的 NPC 列表（供调用方按需触发立绘自动生成等副作用）。
-    */
+   * 匹配顺序：① entry.npcId 命中已有 NPC 的稳定 id；② 回退到按 displayName 线性匹配。
+   * 已存在 NPC 调 {@link Npc.mergeFromAi}（白名单策略，核心层默认冻结）；
+   * 新 NPC 调 {@link Npc.fromAiData} 构造，currentLocation 取 entry.currentLocation 或回退到 options.currentLocation。
+   * 全部 nearbyNpcs 处理完后，统一标记为 active 并刷新 lastSeen。最后应用 coreChangeEvents。
+   *
+   * 主键是 npcId，同名 NPC 天然共存：AI 群体同名输出（五名守山弟子）各自建卡，
+   * 不再塌成一人——本回合已被按名/按 id 命中过的人不再重复命中（防同名条目全并进第一人）。
+   * 按 npcId 命中但显示名不同 → 视为 AI 改名（更新显示名，键不动）。
+   * @return 本次新建的 NPC 列表（供调用方按需触发立绘自动生成等副作用）。
+   */
   function applyNpcUpdates(
     entries: NpcNearbyEntry[],
     protagonistLinggen?: string[],
@@ -139,14 +174,9 @@ export function useNpcStore() {
     const currentWorldTime = options?.currentWorldTime ?? null;
     const touchedThisRound = new Set<Npc>();
     const createdThisRound: Npc[] = [];
-    /**
-     * 本回合已经用过的名字。
-     *
-     * 用途：AI 输出"五名守山弟子"这类群体时，常常给出 5 条 **同名** 的条目。
-     * 而 store 是按 displayName 索引的——同名条目会全部命中同一个人，5 条塌成 1 条，
-     * 玩家看到的就是"剧情里五个人、面板里一个人"。故同回合内第二次出现的同名条目
-     * 一律视为**另一个人**，另起名（守山弟子（2）…）单独建卡。
-     */
+    /** 本回合已被按 id 命中过的 npcId（AI 群体输出会带相同 id，第二个起视为新人）。 */
+    const usedIds = new Set<string>();
+    /** 本回合已被按名命中过的显示名（无 id 的同名群体条目，第二个起视为新人）。 */
     const usedNames = new Set<string>();
 
     for (const entry of entries) {
@@ -154,32 +184,37 @@ export function useNpcStore() {
       if (!name) continue;
 
       const existingByNpcId = entry.npcId ? findByNpcId(entry.npcId) : undefined;
-      let existing = existingByNpcId ?? npcMap.value.get(name);
-      // 该名字本回合已被占用（且不是按 npcId 精确命中的既有 NPC）→ 当作新个人处理。
-      if (existing && !existingByNpcId && usedNames.has(name)) existing = undefined;
+      let existing = existingByNpcId;
+      // 该 id 本回合已被命中过（AI 群体输出同 id）→ 当作另一个人。
+      if (existing && entry.npcId && usedIds.has(entry.npcId)) existing = undefined;
+      // 回退按名匹配：名字本回合已被占用（且不是按 npcId 精确命中）→ 视为新个人。
+      if (!existing && !usedNames.has(name)) existing = getNpc(name);
 
       if (existing) {
+        // 按 npcId 命中但显示名不同 → 视为 AI 改名（主键是 id，直接改显示名即可）。
+        if (existingByNpcId && existingByNpcId.displayName !== name) {
+          gameLog.info(
+            `[NpcStore] 「${existingByNpcId.displayName}」被 AI 改名为「${name}」（npcId 一致，视为同一人）。`,
+          );
+          existingByNpcId.setDisplayName(name);
+        }
         existing.mergeFromAi(entry, protagonistLinggen);
         touchedThisRound.add(existing);
-        usedNames.add(name);
+        usedIds.add(existing.id);
+        usedNames.add(existing.displayName);
       } else {
-        // 名字撞车就加序号，保证每个人在 store 里各占一格。
-        let uniqueName = name;
-        let seq = 2;
-        while (npcMap.value.has(uniqueName) || usedNames.has(uniqueName)) {
-          uniqueName = `${name}（${seq}）`;
-          seq += 1;
-        }
-        usedNames.add(uniqueName);
         const npc = Npc.fromAiData(
-          { ...entry, displayName: uniqueName },
+          { ...entry, displayName: name },
           protagonistLinggen,
           currentLocation,
           currentWorldTime,
         );
-        npcMap.value.set(uniqueName, npc);
+        npcMap.value.set(npc.id, npc);
+        ensureUniqueId(npc, currentLocation);
         touchedThisRound.add(npc);
         createdThisRound.push(npc);
+        usedIds.add(npc.id);
+        usedNames.add(name);
       }
     }
 
@@ -257,8 +292,12 @@ export function useNpcStore() {
   function restoreNpcs(data: NpcPlayInfo[]): void {
     npcMap.value.clear();
     for (const d of data) {
-      const npc = Npc.fromData(d);
-      npcMap.value.set(npc.displayName, npc);
+      // 存档迁移：老存档 NPC 可能没有 id——按合成规则补齐（迁移点，只此一处），
+      // 否则 findByNpcId 对该 NPC 永远 miss。id 在 Character 构造器里无兜底，必须先补。
+      const fixed = d.id ? d : { ...d, id: resolveNpcId(undefined, d.displayName ?? "", d.identity ?? "", d.currentLocation ?? null) };
+      const npc = Npc.fromData(fixed);
+      npcMap.value.set(npc.id, npc);
+      ensureUniqueId(npc, npc.currentLocation);
     }
   }
 
@@ -267,11 +306,17 @@ export function useNpcStore() {
   }
 
   function setNpc(npc: Npc): void {
-    npcMap.value.set(npc.displayName, npc);
+    npcMap.value.set(npc.id, npc);
   }
 
-  function removeNpc(displayName: string): void {
-    npcMap.value.delete(displayName);
+  function removeNpc(npcId: string): void {
+    npcMap.value.delete(npcId);
+  }
+
+  /** 按显示名删除（仅供测试假人清理等按名场景；正式链路请用 {@link removeNpc}(npcId)）。 */
+  function removeNpcByName(displayName: string): void {
+    const npc = getNpc(displayName);
+    if (npc) npcMap.value.delete(npc.id);
   }
 
   return {
@@ -293,6 +338,7 @@ export function useNpcStore() {
     clearNpcs,
     setNpc,
     removeNpc,
+    removeNpcByName,
     lastSeenScore,
     sortByRecent,
   };

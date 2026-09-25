@@ -5,9 +5,12 @@ import { completeChatWithMessagesJson, type JsonChatRequestPayload, type ChatMes
 import { Protagonist } from "../role_core/Protagonist";
 import { factionStore } from "../role_core/factionStore";
 import { buildChapterDirective } from "../role_core/chapterStore";
-import { describeNextBreakthrough } from "../role_core/realmUtils";
+import { storyStore } from "../role_core/storyStore";
+import { describeNextBreakthrough, isMortalPeakLocked } from "../role_core/realmUtils";
 import type { ProtagonistPlayInfo, NarrationPerson, EquippedSlotsState, GongfaSlotsState, InventoryStackItem } from "../role_core/types/playInfo";
 import { formatWorldLocationDash } from "../role_core/types/worldLocation";
+import type { WorldTime } from "../role_core/worldTime";
+import { formatBuffForDisplay, isBuffExpired } from "../role_core/types/characterBuff";
 
 export interface StoryChatEntry {
   role: "user" | "assistant";
@@ -28,6 +31,8 @@ export interface StoryGenerateInput {
   sceneNpcSnapshot?: string;
   /** 当前所在地点（让剧情 AI 感知场景）。 */
   currentWorldLocation?: string;
+  /** 当前世界时间；用于过滤已到期的持久状态（`buffs`），不传则整体跳过该段。 */
+  currentWorldTime?: WorldTime | null;
   /** 场景配额硬约束（秘境层数 / 擂台轮次 / 连续战斗波次触顶时注入）。 */
   sceneDirective?: string;
 }
@@ -87,6 +92,21 @@ function narrationPersonLine(person: NarrationPerson): string {
   }
 }
 
+/**
+ * 持久状态行（重伤后的「气血亏虚」等）。
+ *
+ * 剧情 AI 不看这条就会把「血上限打了七折」当成主角本来就这么弱，
+ * 写出来的行动强度与伤势对不上。无世界时间时整段不注入（无法判到期，宁缺勿错）。
+ */
+function buffLine(p: ProtagonistPlayInfo, now?: WorldTime | null): string {
+  if (!now || !p.buffs || p.buffs.length === 0) return "";
+  const lines = p.buffs
+    .filter(b => !isBuffExpired(b, now))
+    .map(b => formatBuffForDisplay(b, now));
+  if (lines.length === 0) return "";
+  return `当前状态（持久）：${lines.join("；")}（写行动强度与体力描写时必须顾及）`;
+}
+
 function formatEquipSlot(label: string, slot: EquippedSlotsState[number]): string {
   if (!slot) return `${label}：无`;
   return `${label}：${slot.name}（${slot.grade}）${slot.desc ? "—" + slot.desc : ""}`;
@@ -125,7 +145,12 @@ function formatInventorySlots(slots: Array<InventoryStackItem | null>): string {
   return items.map(formatInventoryItem).join("、");
 }
 
-function buildStoryUserContent(p: ProtagonistPlayInfo, sceneNpcSnapshot?: string, currentWorldLocation?: string): string {
+function buildStoryUserContent(
+  p: ProtagonistPlayInfo,
+  sceneNpcSnapshot?: string,
+  currentWorldLocation?: string,
+  currentWorldTime?: WorldTime | null,
+): string {
   const origin = p.originStory?.trim() || "—";
   const birthPlace = p.birthPlace ? formatWorldLocationDash(p.birthPlace) : "—";
 
@@ -158,6 +183,19 @@ function buildStoryUserContent(p: ProtagonistPlayInfo, sceneNpcSnapshot?: string
       "③ 已知的势力名称、驻地、与主角关系不得与上述记录冲突。\n"
     : "";
 
+  // 主线进度近况：把状态 AI 每回合自报的「本回合是否与主线有关」回注给剧情 AI。
+  // 没有这条回读时，主线写了就等于写完——AI 不知道自己已经连续几回合没碰主线，
+  // 玩家也不知道。闭环的关键就在这一段（零额外调用，纯回读已有数据）。
+  const trail = storyStore.recentMainlineTrail().slice(-5);
+  const mainlineBlock = trail.length > 0
+    ? `\n【主线进度近况】最近 ${trail.length} 回合主线推进记录：\n` +
+      trail.map(e => e.advanced
+        ? `- 第${e.round}回合 ✅ ${e.note || "与主线相关的进展"}`
+        : `- 第${e.round}回合 ❌`).join("\n") +
+      `\n（若已连续多回合 ❌，请在尊重玩家当前行动的前提下，让环境 / NPC 把主线线索往玩家身边送——` +
+      `用传讯、路遇、他人相告这类自然方式，不要强行打断玩家正在做的事。）\n`
+    : "";
+
   return [
     "【主角摘要 · 请据此与历史剧情继续生成后续剧情】",
     "",
@@ -165,12 +203,13 @@ function buildStoryUserContent(p: ProtagonistPlayInfo, sceneNpcSnapshot?: string
     genderLine(p.gender),
     narrationPersonLine(p.narrationPerson),
     `境界：${Protagonist.formatRealm(p.realm)}${p.realmComplete ? "·圆满" : ""}`,
-    `修为状态：${p.realmComplete ? describeNextBreakthrough(p.realm.major, p.realm.minor) : "修为未圆满"}`,
+    `修为状态：${p.realmComplete ? describeNextBreakthrough(p.realm.major, p.realm.minor, p.linggen) : (isMortalPeakLocked(p.realm.major, p.realm.minor, p.linggen) ? "修为已积满，但无灵根、无法引气入体，境界锁死在凡人后期" : "修为未圆满")}`,
     `灵根：${Protagonist.formatLinggenElements(p.linggen)}`,
     `年龄：${p.age}`,
     `寿元：${p.shouyuan}`,
     `当前血量：${p.currentHp}/${p.maxHp}`,
     `当前法力：${p.currentMp}/${p.maxMp}`,
+    buffLine(p, currentWorldTime),
     locationLine,
     "",
     "【出身背景】",
@@ -187,6 +226,7 @@ function buildStoryUserContent(p: ProtagonistPlayInfo, sceneNpcSnapshot?: string
     "【储物袋】",
     formatInventorySlots(p.inventorySlots),
     factionBlock,
+    mainlineBlock,
     npcLine,
     "",
   ].join("\n");
@@ -219,7 +259,7 @@ export function buildStoryRequestPayload(input: StoryGenerateInput): JsonChatReq
 
   messages.push({
     role: "user",
-    content: buildStoryUserContent(input.protagonist, input.sceneNpcSnapshot, input.currentWorldLocation),
+    content: buildStoryUserContent(input.protagonist, input.sceneNpcSnapshot, input.currentWorldLocation, input.currentWorldTime),
   });
 
   // 场景配额硬约束：放在最后一条 user 消息里（最靠近生成位置，权重最高）。

@@ -37,8 +37,17 @@ const apiSlice = computed(() => ({
   apiModel: apiModel.value,
 }));
 
-const { phase, errorMessage, worldTime, worldTimeBaseline, worldLocation } =
-  useOpeningStoryFromFateChoice(fateChoiceRef, apiSlice);
+const {
+  phase,
+  errorMessage,
+  worldTime,
+  worldTimeBaseline,
+  worldLocation,
+  // 开局状态生成失败时，中栏要显示 warning 条 + 「重新生成初始状态」按钮。
+  initStateFailed,
+  retryingInitState,
+  retryInitState,
+} = useOpeningStoryFromFateChoice(fateChoiceRef, apiSlice);
 
 /**
  * 挂载自检：主角为空但活动存档里明明有主角数据时，直接重灌一次。
@@ -128,9 +137,9 @@ function startTestBattle() {
   const p = protagonist.value;
   if (!p) return;
 
-  // 清掉上一次测试残留的假人。
+  // 清掉上一次测试残留的假人（假人以名字注册清理，正式 NPC 主键是 npcId）。
   for (const n of ALL_TEST_DUMMY_NAMES) {
-    npcStore.removeNpc(n);
+    npcStore.removeNpcByName(n);
   }
 
   // 假人 HP/MP/属性全部取自主角境界的纯净基准值（境界表），不受主角丹药/天赋/装备加成影响。
@@ -257,6 +266,9 @@ function startTestBattle() {
         <StoryChatPanel
           :phase="phase"
           :error-message="errorMessage"
+          :init-state-failed="initStateFailed"
+          :retrying-init-state="retryingInitState"
+          @retry-init-state="retryInitState"
           :current-world-location="worldLocation"
           :battle-result="props.battleResult"
           :cultivation-input="pendingCultivation"
@@ -290,6 +302,7 @@ function startTestBattle() {
         <div id="pane-side" class="main-screen__pane-inner">
           <SideToolbarPanel
             :current-location="worldLocation"
+            :current-world-time="worldTime"
             :test-disabled="isBusy"
             @test-battle="startTestBattle"
             @load-save="(v) => emit('loadSave', v)"

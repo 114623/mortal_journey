@@ -51,7 +51,7 @@ const totalExp = computed(() => clampedCount.value * EXP_PER_STONE);
 
 const cultivationTimeMult = computed(() => {
   const gradeMult = props.gongfa ? (GONGFA_GRADE_CULTIVATION_MULT[props.gongfa.grade] ?? 1.0) : 1.0;
-  const linggenMult = LINGGEN_CULTIVATION_MULT[props.linggenCount] ?? 0.7;
+  const linggenMult = LINGGEN_CULTIVATION_MULT[props.linggenCount] ?? 0.2;
   const insightMult = 1 + props.insight * 0.01;
   return gradeMult * linggenMult * insightMult;
 });

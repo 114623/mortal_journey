@@ -52,6 +52,12 @@ export function useOpeningStoryFromFateChoice(
   storyBody: Ref<string>;
   phase: Ref<OpeningStoryPhase>;
   errorMessage: Ref<string>;
+  /** 开局**状态**生成是否失败（功法 / 物品 / NPC / 地点可能缺失）。 */
+  initStateFailed: Ref<boolean>;
+  /** 「重新生成初始状态」是否正在跑（按钮置灰用）。 */
+  retryingInitState: Ref<boolean>;
+  /** 手动重跑开局状态生成；成功后自动清掉 initStateFailed。 */
+  retryInitState: () => Promise<void>;
   worldTime: Ref<WorldTime>;
   worldTimeBaseline: Ref<WorldTime>;
   worldLocation: Ref<WorldLocation | null>;
@@ -59,6 +65,24 @@ export function useOpeningStoryFromFateChoice(
   initActionOptions: Ref<ActionSuggestions | null>;
 } {
   const errorMessage = ref("");
+  /**
+   * 开局状态生成失败标记。
+   *
+   * 【2026-09-25】原先 `generateInitState` 失败只写 gameLog 就被吞掉，流程照常走到
+   * phase="ready" 并落盘——玩家看到的是「开局没功法、没物品、没 NPC」，
+   * 却没有任何提示，只会以为这游戏开局就是空的。现在把它变成可见状态 + 手动重试入口。
+   */
+  const initStateFailed = ref(false);
+  const retryingInitState = ref(false);
+
+  /** 最近一次开局的入参快照，仅供「重新生成初始状态」复用。 */
+  let lastOpeningInput: {
+    apiUrl: string;
+    apiKey: string;
+    model: string;
+    storyBody: string;
+    protagonist: Protagonist;
+  } | null = null;
 
   let abortCtl: AbortController | null = null;
 
@@ -74,9 +98,83 @@ export function useOpeningStoryFromFateChoice(
   function resetStoryOnly(): void {
     storyStore.storyBody.value = "";
     errorMessage.value = "";
+    initStateFailed.value = false;
     storyStore.phase.value = "idle";
     storyStore.chatMessages.value = [];
     resetWorldClock();
+  }
+
+  /**
+   * 把开局状态结果落到各处（地点 / 快照 / 选项 / 主角 / NPC / 地图）。
+   *
+   * 开局首次生成与「手动重新生成」共用这一条路径，避免两处逻辑走偏。
+   * 注意：**不在这里调 `applyTraitEffects`** —— 天赋效果只在开局结算一次，
+   * 重跑状态生成时再算一遍会把物品 / 灵石 / 属性重复加一次。
+   */
+  function applyOpeningState(stateResult: Awaited<ReturnType<typeof generateInitState>>): void {
+    if (stateResult.worldLocation && !isEmptyWorldLocation(stateResult.worldLocation)) {
+      storyStore.worldLocation.value = stateResult.worldLocation;
+    }
+
+    if (stateResult.storySnapshot.trim()) {
+      storyStore.initSnapshot.value = stateResult.storySnapshot.trim();
+    }
+
+    if (stateResult.actionOptions) {
+      storyStore.actionOptions.value = stateResult.actionOptions;
+      storyStore.noteBranchAxes(stateResult.actionOptions);
+      storyStore.noteActionOptions(stateResult.actionOptions);
+    }
+
+    const current = protagonist.value;
+    if (current) {
+      current.applyInitState(stateResult);
+    }
+    if (stateResult.nearbyNpcs.length > 0) {
+      const createdNpcs = npcStore.applyNpcUpdates(stateResult.nearbyNpcs, current?.linggen ?? [], {
+        currentLocation: stateResult.worldLocation ?? null,
+        currentWorldTime: storyStore.worldTime.value,
+      });
+      autoGeneratePortraits(createdNpcs);
+    }
+
+    if (stateResult.worldLocation && !isEmptyWorldLocation(stateResult.worldLocation)) {
+      worldMapStore.addLocation(stateResult.worldLocation);
+    }
+  }
+
+  /**
+   * 手动重跑开局状态生成。
+   *
+   * 玩家在 warning 条上点「重新生成初始状态」时调用。走的是与首次完全相同的链路，
+   * 成功后清掉失败标记并立即覆盖存档；失败则保持标记，玩家可以再点。
+   */
+  async function retryInitState(): Promise<void> {
+    if (retryingInitState.value) return;
+    const input = lastOpeningInput;
+    if (!input) {
+      gameLog.warn("[OpeningStory] 缺少开局入参，无法重新生成初始状态。");
+      return;
+    }
+    retryingInitState.value = true;
+    try {
+      const stateResult = await generateInitState({
+        apiUrl: input.apiUrl,
+        apiKey: input.apiKey || undefined,
+        model: input.model,
+        storyBody: input.storyBody,
+        protagonist: input.protagonist,
+      });
+      applyOpeningState(stateResult);
+      initStateFailed.value = false;
+      gameLog.info("[OpeningStory] 已重新生成初始状态。");
+      seedOpeningChatMessage();
+      writeActiveSave();
+    } catch (e) {
+      gameLog.error("[OpeningStory] 重新生成初始状态失败：" + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      retryingInitState.value = false;
+    }
   }
 
   /** 开局状态完成后：把开局正文灌入 chatMessages[0]（携带开局快照）。 */
@@ -115,6 +213,7 @@ export function useOpeningStoryFromFateChoice(
       Protagonist.loadFromFateChoice(fc);
       storyStore.storyBody.value = "";
       errorMessage.value = "";
+      initStateFailed.value = false;
       storyStore.chatMessages.value = [];
       resetWorldClock();
 
@@ -156,6 +255,14 @@ export function useOpeningStoryFromFateChoice(
         }
 
         storyStore.storyBody.value = storyResult.storyBody;
+        // 存一份入参，供玩家后面点「重新生成初始状态」时复用。
+        lastOpeningInput = {
+          apiUrl: url,
+          apiKey: String(apiKey || "").trim(),
+          model,
+          storyBody: storyResult.storyBody,
+          protagonist: p,
+        };
 
         try {
           const stateResult = await generateInitState({
@@ -168,35 +275,11 @@ export function useOpeningStoryFromFateChoice(
           });
           if (abortCtl !== ac) return;
 
-          if (stateResult.worldLocation && !isEmptyWorldLocation(stateResult.worldLocation)) {
-            storyStore.worldLocation.value = stateResult.worldLocation;
-          }
-
-          if (stateResult.storySnapshot.trim()) {
-            storyStore.initSnapshot.value = stateResult.storySnapshot.trim();
-          }
-
-          if (stateResult.actionOptions) {
-            storyStore.actionOptions.value = stateResult.actionOptions;
-            storyStore.noteBranchAxes(stateResult.actionOptions);
-          }
-
-          const current = protagonist.value;
-          if (current) {
-            current.applyInitState(stateResult);
-          }
-          if (stateResult.nearbyNpcs.length > 0) {
-            const createdNpcs = npcStore.applyNpcUpdates(stateResult.nearbyNpcs, p.linggen, {
-              currentLocation: stateResult.worldLocation ?? null,
-              currentWorldTime: storyStore.worldTime.value,
-            });
-            autoGeneratePortraits(createdNpcs);
-          }
-
-          if (stateResult.worldLocation && !isEmptyWorldLocation(stateResult.worldLocation)) {
-            worldMapStore.addLocation(stateResult.worldLocation);
-          }
+          applyOpeningState(stateResult);
         } catch (stateErr) {
+          // 不再静默：初始状态失败意味着功法 / 物品 / NPC / 地点全都没落地，
+          // 必须由玩家看见（warning 条 + 手动重试按钮）。
+          initStateFailed.value = true;
           gameLog.error("[OpeningStory] 状态生成失败：" + (stateErr instanceof Error ? stateErr.message : String(stateErr)));
         }
 
@@ -227,6 +310,9 @@ export function useOpeningStoryFromFateChoice(
     storyBody: storyStore.storyBody,
     phase: storyStore.phase,
     errorMessage,
+    initStateFailed,
+    retryingInitState,
+    retryInitState,
     worldTime: storyStore.worldTime,
     worldTimeBaseline: storyStore.worldTimeBaseline,
     worldLocation: storyStore.worldLocation,

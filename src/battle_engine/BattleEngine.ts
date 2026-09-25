@@ -28,9 +28,12 @@ export class BattleEngine implements BattleEngineLike {
 
   private ai = new BattleAI();
   private floatId = 0;
+  /** 主角倒地提示只播一次（checkBattleEnd 每次行动后都会调用）。 */
+  private protagonistDownAnnounced = false;
   state!: BattleState;
 
   init(allies: BattleCombatant[], enemies: BattleCombatant[], triggerEntry: unknown): void {
+    this.protagonistDownAnnounced = false;
     this.state = {
       phase: "init",
       actionCount: 0,
@@ -356,16 +359,34 @@ export class BattleEngine implements BattleEngineLike {
 
     const alliesAlive = this.state.allies.some(a => !a.isDead);
     const enemiesAlive = this.state.enemies.some(e => !e.isDead);
-    // 主角阵亡即战败：主角是玩家唯一可操控角色，阵亡后战斗无意义；
-    // 结算（settleBattle）亦以 phase==="defeat" 判定主角身亡触发结局。
-    const protagonistDead = this.state.allies.some(a => a.isProtagonist && a.isDead);
+
+    // 【2026-09-24 修正】原逻辑是「主角阵亡即战败」（protagonistDead 短路）。
+    // 那等于队友毫无翻盘机会，更致命的是它让「胜方七成存活」对主角永远不可达：
+    // 主角一倒就被判 defeat，settleBattle 的 isVictory 恒为 false，于是死斗中主角
+    // 必然真死（resolveFate 的败方分支 return "dead"）。
+    // 现改为队友接手打完，主角生死由最终胜负决定——胜则享七成存活，败则死斗真死。
+    // 主角 isDead 后 checkActorReady() 会跳过他（过滤 !isDead），不会卡在 playerAction。
+    if (!this.protagonistDownAnnounced) {
+      const pc = this.state.allies.find(a => a.isProtagonist);
+      if (pc?.isDead && alliesAlive) {
+        this.protagonistDownAnnounced = true;
+        this.addLog({
+          turn: this.state.actionCount,
+          actorName: pc.name,
+          action: "重伤倒地",
+          type: "info",
+          narrative: `${pc.name}重伤倒地，生死悬于同伴能否取胜。`,
+          team: "ally",
+        });
+      }
+    }
 
     if (!enemiesAlive) {
       this.state.phase = "victory";
       this.emitBattleEnd();
       return true;
     }
-    if (!alliesAlive || protagonistDead) {
+    if (!alliesAlive) {
       this.state.phase = "defeat";
       this.emitBattleEnd();
       return true;

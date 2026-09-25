@@ -172,7 +172,7 @@ function openGongfaDetail(index: number) {
   if (!npc) return;
   const cell = npc.gongfaSlots[index];
   if (!cell) return;
-  itemDetailPayload.value = buildGongfaDetailPayload(cell, undefined, npc.linggen, undefined, undefined, () => getNpcDerivedStats(npc), computeLinggenCombatBonuses(npc.linggen, npc.realm.major).cooldownReduce);
+  itemDetailPayload.value = buildGongfaDetailPayload(cell, undefined, npc.linggen, undefined, undefined, () => getNpcDerivedStats(npc), computeLinggenCombatBonuses(npc.linggen, npc.realm.major).cooldownReduce, npc.realm);
   itemDetailOpen.value = true;
 }
 
@@ -181,7 +181,7 @@ function openBagDetail(index: number) {
   if (!npc) return;
   const cell = npc.inventorySlots[index];
   if (!cell) return;
-  itemDetailPayload.value = buildInventoryStackDetailPayload(cell, undefined, npc.linggen, undefined, undefined, () => getNpcDerivedStats(npc), computeLinggenCombatBonuses(npc.linggen, npc.realm.major).cooldownReduce);
+  itemDetailPayload.value = buildInventoryStackDetailPayload(cell, undefined, npc.linggen, undefined, undefined, () => getNpcDerivedStats(npc), computeLinggenCombatBonuses(npc.linggen, npc.realm.major).cooldownReduce, npc.realm.major, npc.realm.minor);
   itemDetailOpen.value = true;
 }
 

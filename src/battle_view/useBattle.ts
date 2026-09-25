@@ -11,6 +11,7 @@ import { BattleEngine } from "../battle_engine/BattleEngine";
 import { createBattleCombatants } from "../battle_engine/battleInit";
 import { settleBattle } from "../battle_engine/battleSettle";
 import { gameLog } from "../log/gameLog";
+import { storyStore } from "../role_core/storyStore";
 import { BASE_GAUGE_TIME_MS, AGILITY_DIVISOR, GAUGE_MAX, ACTION_DELAY_MS } from "../battle_engine/constants";
 import { getActiveDifficulty } from "../save/gameSave";
 
@@ -173,7 +174,12 @@ export function useBattle() {
       result.value = null;
     } else {
       const { protagonistCanDie, companionsCanDie } = difficultyBattleOpts();
-      result.value = settleBattle(s, { protagonistCanDie, companionsCanDie });
+      result.value = settleBattle(s, {
+        protagonistCanDie,
+        companionsCanDie,
+        // 重伤 buff 需要起始世界时间才算得出到期日。
+        now: storyStore.worldTime.value,
+      });
     }
   }
 

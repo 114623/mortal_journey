@@ -438,6 +438,8 @@ export function isEndedSave(p: MjSavePayload | null | undefined): boolean {
  * 调用前应先 `resetAllGameState()` 清场；恢复后 `storyStore.restored=true`。
  */
 export function restoreSave(payload: MjSavePayload): void {
+  // 存档迁移：老存档 NPC 可能缺 id——由 npcStore.restoreNpcs 统一按合成规则补齐
+  // （主键 displayName→npcId 改造的迁移点，见 npcStore.ts）。
   // 存档迁移：阶层系统上线前的老存档，功法全部缺 tier 字段。
   // 补「与持有者同阶」——同阶压制系数为 1，数值与行为完全不变，
   // 但阶层从此显形（天道编辑/修为摘要可见），此后境界提升即按正常规则参与压制。

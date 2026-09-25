@@ -295,6 +295,45 @@
   color: #e8a598;
 }
 
+/* 开局状态生成失败的 warning 条：正文已出但功法 / 物品 / NPC 没落地。
+   配色沿用 error 系，但做成可操作的条（带重试按钮），不是纯文本提示。 */
+.main-panel__init-state-warning {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 0 auto 10px;
+  padding: 8px 12px;
+  max-width: 92%;
+  border: 1px solid rgba(232, 165, 152, 0.45);
+  border-radius: 8px;
+  background: rgba(232, 165, 152, 0.08);
+  color: #e8a598;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.main-panel__init-state-btn {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid rgba(232, 165, 152, 0.55);
+  border-radius: 6px;
+  background: transparent;
+  color: #e8a598;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.main-panel__init-state-btn:hover:not(:disabled) {
+  background: rgba(232, 165, 152, 0.12);
+}
+
+.main-panel__init-state-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .main-panel__battle-entry {
   display: flex;
   justify-content: center;
@@ -532,6 +571,26 @@
   color: var(--mj-fg);
   text-align: right;
   max-width: 80%;
+}
+
+/* 本地提示气泡（如「本回合状态回报不完整」）：居中、灰字、弱存在感。
+   只给玩家看，不进 AI 上下文（buildChatHistory 已过滤 notice）。 */
+.main-panel__chat-item--notice {
+  display: flex;
+  justify-content: center;
+  margin: 4px 0;
+}
+
+.main-panel__chat-bubble--notice {
+  background: transparent;
+  border: 1px dashed rgba(141, 122, 95, 0.5);
+  color: #8d7a5f;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  padding: 4px 10px;
+  border-radius: 6px;
+  max-width: 90%;
+  text-align: center;
 }
 
 /* 滚动大总结裁剪历史后，作为聊天栏顶部的「早期经历总纲」占位消息样式。 */
